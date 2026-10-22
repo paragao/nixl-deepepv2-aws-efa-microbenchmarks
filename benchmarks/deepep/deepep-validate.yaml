@@ -2,7 +2,7 @@ apiVersion: kubeflow.org/v2beta1
 kind: MPIJob
 metadata:
   name: deepep-validate
-  namespace: paragao
+  namespace: ${K8S_NAMESPACE}
 spec:
   runPolicy:
     cleanPodPolicy: Running
@@ -30,7 +30,7 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa@sha256:c2673e4170119007d0825d0a20eeef75ddf717cf7797b731d4bc1bd76bacf693
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}@sha256:c2673e4170119007d0825d0a20eeef75ddf717cf7797b731d4bc1bd76bacf693
             imagePullPolicy: Always
             name: deepep-validate-launcher
             resources:
@@ -84,7 +84,7 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa@sha256:c2673e4170119007d0825d0a20eeef75ddf717cf7797b731d4bc1bd76bacf693
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}@sha256:c2673e4170119007d0825d0a20eeef75ddf717cf7797b731d4bc1bd76bacf693
             imagePullPolicy: Always
             name: deepep-validate-worker
             env:

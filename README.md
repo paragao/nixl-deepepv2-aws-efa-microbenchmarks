@@ -13,12 +13,18 @@ Built for Hopper (`sm_90`) and Blackwell (`sm_100`, `sm_103`) in a single image.
 
 | Path | What |
 |---|---|
-| `awslabs-contrib/architectures/containers/deepv2-nixl-efa/Dockerfile` | the image (multi-arch, all build fixes + license hygiene) |
-| `.../setup_deepep_gin.sh` | DeepEP GIN build helper |
-| `.../check_licenses.py` + `.../validation-gate.yaml` | throughput floors + AWS OSS license gate |
-| `.../README.md` | recipe-level detail |
-| `deepep-nixl-pipeline-design.md` | full design doc (decisions, build fixes, pipeline) |
-| `*.yaml` (top level) | k8s validation manifests + node probes |
+| `awslabs-contrib/architectures/containers/deepv2-nixl-efa/` | the container recipe (one image: Dockerfile, build helper, license gate) |
+| `benchmarks/nccl/` | NCCL collectives manifests |
+| `benchmarks/deepep/` | DeepEP V2 manifests + GIN probes |
+| `benchmarks/nixl/` | NIXL target/initiator manifests |
+| `benchmarks/efa/` | EFA version probe |
+| `docs/deepep-nixl-pipeline-design.md` | full design doc (decisions, build fixes, pipeline) |
+| `env.example.sh` | the environment variables every manifest and doc uses |
+
+All manifests and the recipe use `${VAR}` placeholders (account, region,
+cluster, namespace, repo…) instead of hardcoded values. Fill them in by copying
+`env.example.sh`, editing it, sourcing it, and substituting with `envsubst`
+(shown below).
 
 ## Pinned versions
 
@@ -80,7 +86,13 @@ python3 awslabs-contrib/architectures/containers/deepv2-nixl-efa/check_licenses.
 - The kubeflow **mpi-operator** CRD installed (`kubectl get crd mpijobs.kubeflow.org`).
 - The built image pushed to a registry your cluster can pull.
 
-Set the image reference in the manifests below to your pushed image before applying.
+Fill in your environment first, then apply. The manifests carry `${VAR}`
+placeholders, so pipe each through `envsubst`:
+
+```bash
+cp env.example.sh env.sh      # then edit env.sh with your values
+source env.sh
+```
 
 ### Run the three suites
 
@@ -89,14 +101,14 @@ Each is a 2-node / 16-rank job. Apply, wait for the launcher pod to reach
 
 ```bash
 # 1. NCCL collectives — all-reduce, all-gather, all-to-all over EFA
-kubectl apply -f nccl-tests-validate.yaml
+envsubst < benchmarks/nccl/nccl-tests-validate.yaml | kubectl apply -f -
 
 # 2. DeepEP V2 — expert-parallel dispatch/combine over NCCL GIN / EFA-GDA
-kubectl apply -f deepep-validate.yaml
+envsubst < benchmarks/deepep/deepep-validate.yaml | kubectl apply -f -
 
 # 3. NIXL — point-to-point transfer over the LIBFABRIC/EFA backend
-kubectl apply -f nixl-test-target-validate.yaml      # start the target first
-kubectl apply -f nixl-test-initiator-validate.yaml   # then the initiator
+envsubst < benchmarks/nixl/nixl-test-target-validate.yaml    | kubectl apply -f -   # target first
+envsubst < benchmarks/nixl/nixl-test-initiator-validate.yaml | kubectl apply -f -   # then initiator
 ```
 
 ### Success markers (what a pass looks like)
@@ -110,5 +122,5 @@ kubectl apply -f nixl-test-initiator-validate.yaml   # then the initiator
 Throughput floors for sign-off live in `validation-gate.yaml`; the gate compares
 a 3-run mean against each floor and blocks a regression.
 
-See `deepep-nixl-pipeline-design.md` for the full design, the six build fixes,
+See `docs/deepep-nixl-pipeline-design.md` for the full design, the six build fixes,
 and the publish/provenance flow.

@@ -20,7 +20,7 @@
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
 #     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
 #     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
-#     -t <registry>/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0 .
+#     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0 .
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
