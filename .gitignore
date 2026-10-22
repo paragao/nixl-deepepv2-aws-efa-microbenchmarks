@@ -1,0 +1,16 @@
+# Kiro / workspace IDE config (not part of the recipe)
+.kiro/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Scratch / SBOM artifacts
+*.tsv
+SBOM.txt
+sbom.spdx.json
+
+# Editor / OS
+*.swp
+.DS_Store
