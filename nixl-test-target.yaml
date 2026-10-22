@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nixl-test-target
+  namespace: paragao
+  labels: {app: nixl-test, role: target}
+spec:
+  restartPolicy: Never
+  nodeSelector: {node.kubernetes.io/instance-type: p5en.48xlarge}
+  tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+  containers:
+  - name: target
+    image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:multiarch-baseline
+    imagePullPolicy: IfNotPresent
+    env:
+    - {name: NVIDIA_GDRCOPY, value: "enabled"}
+    - {name: LD_LIBRARY_PATH, value: "/opt/nixl/lib/x86_64-linux-gnu:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:/usr/local/lib"}
+    - {name: NIXL_PLUGIN_DIR, value: "/opt/nixl/lib/x86_64-linux-gnu/plugins"}
+    - {name: UCX_TLS, value: "rc,cuda_copy,cuda_ipc,tcp"}
+    command: ["/bin/bash","-c"]
+    args:
+    - |
+      MYIP=$(hostname -i | awk '{print $1}')
+      echo "target binding on $MYIP:9999"
+      /opt/nixl-tests/nixl_test target "$MYIP" 9999
+      echo "NIXL_TARGET_DONE rc=$?"
+      sleep 15
+    securityContext: {capabilities: {add: ["SYS_ADMIN","IPC_LOCK"]}}
+    volumeMounts: [{name: shmem, mountPath: /dev/shm}]
+    resources:
+      limits: {nvidia.com/gpu: 1, vpc.amazonaws.com/efa: 1}
+      requests: {nvidia.com/gpu: 1, vpc.amazonaws.com/efa: 1}
+  volumes:
+  - name: shmem
+    emptyDir: {medium: Memory, sizeLimit: 16Gi}

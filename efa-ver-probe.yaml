@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: efa-ver-probe
+  namespace: paragao
+spec:
+  restartPolicy: Never
+  nodeName: ip-10-240-123-167.ap-southeast-3.compute.internal
+  containers:
+  - name: p
+    image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
+    command: ["sh","-c"]
+    args:
+    - |
+      echo '=== EFA kernel driver version (/sys, no priv) ==='
+      cat /sys/module/efa/version 2>/dev/null || echo "no /sys/module/efa/version"
+      echo '=== efadv_create_comp_cntr in userspace libefa ==='
+      strings /opt/amazon/efa/lib/libefa.so* 2>/dev/null | grep -i 'efadv_create_comp_cntr' | head -3 || echo "not found"
+      echo '=== fi_info efa provider version ==='
+      /opt/amazon/efa/bin/fi_info -p efa 2>/dev/null | grep -iE 'version|efa' | head -8 || echo "fi_info unavailable"
+      echo '=== gdrdrv device present ==='
+      ls -l /dev/gdrdrv 2>/dev/null || echo "no /dev/gdrdrv in this pod (not bind-mounted)"
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        vpc.amazonaws.com/efa: 1

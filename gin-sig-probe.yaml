@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gin-sig-probe
+  namespace: paragao
+spec:
+  restartPolicy: Never
+  nodeName: ip-10-240-123-167.ap-southeast-3.compute.internal
+  containers:
+  - name: p
+    image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
+    command: ["sh","-c"]
+    args:
+    - |
+      set -x
+      strings /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so 2>/dev/null | grep -iE 'strong.?signal|gin.*signal|aws-ofi-nccl' | head -30
+      echo '=== ofi version ==='
+      find /opt/amazon -iname '*VERSION*' 2>/dev/null | head
+      cat /opt/amazon/ofi-nccl/share/aws-ofi-nccl/VERSION 2>/dev/null
+      echo '=== deepep strong/signal in csrc ==='
+      grep -rniE 'strong.?signal|require.*signal|signal.*support' /opt/amazon/deepep/csrc 2>/dev/null | head -20
+      echo '=== deepep readme GIN env ==='
+      grep -rniE 'NCCL_GIN|GIN_TYPE|GDAKI|strong|signal' /opt/amazon/deepep/README.md 2>/dev/null | head -40
+    resources:
+      limits:
+        nvidia.com/gpu: 1
