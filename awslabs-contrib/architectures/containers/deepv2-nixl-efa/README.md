@@ -224,29 +224,30 @@ transfer completes across the two nodes, exit 0.
 
 ---
 
-## Access the public image
+## Access the published image
 
-The pipeline publishes the validated image to ECR in the shared account,
-region **us-east-2**:
+The pipeline publishes the validated image to ECR. Set the environment
+variables below (see the repo root `env.example.sh`) and substitute them:
 
 ```
-159553542841.dkr.ecr.us-east-2.amazonaws.com/smml-containers/deepepv2-nixl-efa:nixl1.5.0-deepepv2-efa1.50.0
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.50.0
 ```
 
-Pull it (note: the auth token is minted with `--region us-east-1`, but the
-registry host and repo are `us-east-2`):
+Pull it (note: the auth token is minted with `--region ${ECR_TOKEN_REGION}`,
+but the registry host and repo are in `${ECR_REGION}` — some accounts require a
+specific token-mint region):
 
 ```bash
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin 159553542841.dkr.ecr.us-east-2.amazonaws.com
-docker pull 159553542841.dkr.ecr.us-east-2.amazonaws.com/smml-containers/deepepv2-nixl-efa:nixl1.5.0-deepepv2-efa1.50.0
+aws ecr get-login-password --region ${ECR_TOKEN_REGION} \
+  | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com
+docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.50.0
 ```
 
-The current hand-built dev image (ap-southeast-3, same account) is:
+A dev image may live in a separate per-user repo in the same account:
 
 ```
-159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
-@sha256:63aace0c36de300934ff20db12fb85cdb4c5b99c828ed27e9f74d90ad24885af
+${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.50.0
+@${IMAGE_DIGEST}
 ```
 
 Prefer the **digest** for anything long-lived — a tag can be overwritten, a
@@ -254,7 +255,7 @@ digest cannot. On an EKS cluster in the same account, nodes pull via the node
 IAM role; no pull secret is needed. ECR access is account-wide, not
 namespace-scoped.
 
-> A CI pipeline (AWS CodePipeline, us-east-2) builds, scans, cluster-validates
-> (cross-region against the cgk cluster in ap-southeast-3), and republishes this
-> image with full provenance, then opens this upstream PR. See the pipeline
-> design document for the full automation.
+> A CI pipeline (AWS CodePipeline, `${ECR_REGION}`) builds, scans,
+> cluster-validates (cross-region against the EKS cluster in `${AWS_REGION}`),
+> and republishes this image with full provenance, then opens this upstream PR.
+> See the pipeline design document for the full automation.

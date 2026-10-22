@@ -11,6 +11,13 @@ __pycache__/
 SBOM.txt
 sbom.spdx.json
 
+# Node launch-template userData (environment-specific, not for publish)
+p5en-userdata-v2.txt
+*userdata*.txt
+
+# Filled-in environment (copy of env.example.sh with real values)
+env.sh
+
 # Editor / OS
 *.swp
 .DS_Store

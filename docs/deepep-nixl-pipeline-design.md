@@ -49,11 +49,11 @@ The pipeline must deliver seven things, in order:
 
 | # | Decision | Rationale | Alternatives rejected |
 |---|---|---|---|
-| D1 | **Pipeline engine = AWS CodePipeline** in account `159553542841`, region **us-east-2** (ECR repo home) | Shared account standard; keeps build + ECR + validation IAM in one account/region; no GitHub-hosted runner egress to the cluster | GitHub Actions (needs a self-hosted runner or kubeconfig secret to reach the cluster — more moving parts outside the account) |
-| D1a | **ECR auth call uses `--region us-east-1`, but the repo and image live in `us-east-2`** | `aws ecr get-login-password` is only minting an auth token; the login/push registry host (`...dkr.ecr.us-east-2...`) and the repo region are `us-east-2`. The us-east-1 auth region is an account-specific requirement for the token mint. | Minting the token in us-east-2 — not used here per the account's auth setup |
+| D1 | **Pipeline engine = AWS CodePipeline** in account `${AWS_ACCOUNT_ID}`, region **${ECR_REGION}** (ECR repo home) | Shared account standard; keeps build + ECR + validation IAM in one account/region; no GitHub-hosted runner egress to the cluster | GitHub Actions (needs a self-hosted runner or kubeconfig secret to reach the cluster — more moving parts outside the account) |
+| D1a | **ECR auth call uses `--region ${ECR_TOKEN_REGION}`, but the repo and image live in `${ECR_REGION}`** | `aws ecr get-login-password` is only minting an auth token; the login/push registry host (`...dkr.ecr.${ECR_REGION}...`) and the repo region are `${ECR_REGION}`. The ${ECR_TOKEN_REGION} auth region is an account-specific requirement for the token mint. | Minting the token in ${ECR_REGION} — not used here per the account's auth setup |
 | D2 | **Build engine = AWS CodeBuild** with a privileged Linux GPU-less compute | CodePipeline's native build provider; supports Docker/BuildKit; can assume a role to push to ECR | In-cluster rootless BuildKit (current method) — kept as a documented fallback (§8.4), but CodeBuild gives CI isolation and logs |
 | D3 | **Image stays single-layer squashed** via `COPY --from=builder / /` | A hard-won fix (build iterations v4–v12): BuildKit's content-addressed export kept deduping the committed `libnccl.so.2` back to the stale GIN-less 2.28.9 blob. One layer = exactly one copy of every file; no lower-layer blob to resolve back to | Dockerfile-level re-pin, dedicated final layer, `--no-cache`, pin-in-torch-layer — all defeated by multi-layer export dedup |
-| D4 | **Validation runs on the shared EKS cluster** (`shared-eks-cluster-cgk`, p5en.48xlarge H200 nodes), triggered by CodeBuild applying k8s manifests | The collective tests need real EFA + GPUDirect hardware; CodeBuild has no GPUs. CodeBuild assumes a role, runs `kubectl apply`, waits, reads logs, gates | Running tests in CodeBuild directly (no GPUs); a separate manual step (loses the gate) |
+| D4 | **Validation runs on the shared EKS cluster** (`${EKS_CLUSTER}`, p5en.48xlarge H200 nodes), triggered by CodeBuild applying k8s manifests | The collective tests need real EFA + GPUDirect hardware; CodeBuild has no GPUs. CodeBuild assumes a role, runs `kubectl apply`, waits, reads logs, gates | Running tests in CodeBuild directly (no GPUs); a separate manual step (loses the gate) |
 | D5 | **Node driver prerequisite baked into the nodegroup launch template** (`NVreg_EnableStreamMemOPs=1`, `NVreg_RegistryDwords="PeerMappingOverride=1;"`) | GDAKI (GIN GPUDirect-Async backend) registers a GPU MMIO region (`host_register_iomem`) that **requires** these NVIDIA kernel-module flags. Without them GIN fails `DevComm setup failed on all available backends` on **any** node count | Per-instance reboot (nodes get replaced by the autoscaler and come back un-flagged — a loop) |
 | D6 | **Tests = NCCL (all-reduce, all-gather, all-to-all) + DeepEP V2 + NIXL**, all **2-node / 16-rank** | NCCL proves the EFA transport end to end; DeepEP V2 proves the GIN/EFA-GDA path; NIXL proves the LIBFABRIC/EFA path. 2 nodes is the minimum that exercises **internode** RDMA | Single-node (never touches the wire); 1 collective only (misses transport-specific failures) |
 | D7 | **Runtime kernel-mode = `unordered`** via `NCCL_SYM_GIN_KERNELS_ENABLE=0` | DeepEP V2 `ordered` kernels demand GIN **strong signals + VA signals**, which aws-ofi-nccl 1.21.1 on EFA does **not** support; `unordered` needs only weak/counting signals, which EFA supports | `ordered` (fails `GIN strong signals are required, but the GIN plugin does not support them`) |
@@ -72,7 +72,7 @@ The pipeline must deliver seven things, in order:
 ```
                          ┌──────────────────────────────────────────────┐
    git push (Dockerfile, │              AWS CodePipeline                 │
-   setup script,         │              acct 159553542841 / us-east-2    │
+   setup script,         │              acct ${AWS_ACCOUNT_ID} / ${ECR_REGION}    │
    manifests)            │                                               │
         │                │  Source ─► Build ─► Scan ─► Validate ─► Publish ─► Contribute
         ▼                │    │        │        │        │          │          │       │
@@ -92,7 +92,7 @@ The pipeline must deliver seven things, in order:
                          └──────────────────────────────┼───────────┼──────────┼───────┘
                                                          ▼           ▼          ▼
                                             ┌────────────────────────────────────────┐
-                                            │   EKS shared-eks-cluster-cgk (p5en H200) │
+                                            │   EKS ${EKS_CLUSTER} (p5en H200) │
                                             │   NCCL ar/ag/a2a + DeepEP V2 + NIXL      │
                                             │   2 nodes / 16 ranks, EFA + GIN          │
                                             └────────────────────────────────────────┘
@@ -214,16 +214,16 @@ Add in CI: `org.opencontainers.image.revision=<gitsha>`,
 `org.opencontainers.image.source=<repo url>`,
 `org.opencontainers.image.created=<timestamp>`.
 
-**Published image (current, ap-southeast-3):**
+**Published image (current, ${AWS_REGION}):**
 ```
-159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
-@sha256:63aace0c36de300934ff20db12fb85cdb4c5b99c828ed27e9f74d90ad24885af
+${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.50.0
+@${IMAGE_DIGEST}
 ```
-The pipeline (D1) publishes to **us-east-2** ECR, repo
-`smml-containers/deepepv2-nixl-efa` (to be created — the pipeline's publish
+The pipeline (D1) publishes to **${ECR_REGION}** ECR, repo
+`${PUBLISH_REPO}` (to be created — the pipeline's publish
 stage creates it on first run if absent). Note the auth split (D1a): the login
-token is minted with `--region us-east-1`, but the registry host and repo are
-`us-east-2`.
+token is minted with `--region ${ECR_TOKEN_REGION}`, but the registry host and repo are
+`${ECR_REGION}`.
 
 ---
 
@@ -423,15 +423,15 @@ specific repo, is what matters. The one hard requirement is a **two-way link**:
 
 | Direction | Where | What it says |
 |---|---|---|
-| git repo → registry | recipe repo README | the published image URI(s), e.g. `159553542841.dkr.ecr.us-east-2.amazonaws.com/smml-containers/deepepv2-nixl-efa:nixl1.5.0-deepepv2-efa1.50.0`, and that `:validated` tracks the latest signed-off digest |
+| git repo → registry | recipe repo README | the published image URI(s), e.g. `${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.50.0`, and that `:validated` tracks the latest signed-off digest |
 | registry → git repo | ECR repo description + the `org.opencontainers.image.source` label | the git repo URL + path the image was built from |
 
 Set the ECR repo description back-pointer at publish time:
 ```bash
 aws ecr put-repository-catalog-data \
-  --repository-name smml-containers/deepepv2-nixl-efa \
+  --repository-name ${PUBLISH_REPO} \
   --catalog-data 'about=Built from https://github.com/<org>/<repo>/tree/<path>. Purpose: 2-node GPU-collective benchmarking (NCCL/DeepEP V2/NIXL over EFA). Run: see repo README.' \
-  --region us-east-2 --profile compute-sa-admin
+  --region ${ECR_REGION} --profile ${AWS_PROFILE}
 ```
 Neither half is optional: an image with no source link is an orphaned binary; a
 recipe with no published-location note leaves a consumer unable to find the image.
@@ -441,10 +441,10 @@ recipe with no published-location note leaves a consumer unable to find the imag
 ## 8. Reproduction — step by step
 
 ### 8.0 Prerequisites
-- AWS access to `159553542841` (profile `compute-sa-admin`), regions us-east-2
-  (pipeline/ECR; auth token minted via `--region us-east-1`) and ap-southeast-3
-  (cluster, if validating on cgk).
-- `kubectl` context for `shared-eks-cluster-cgk`; the kubeflow mpi-operator CRD
+- AWS access to `${AWS_ACCOUNT_ID}` (profile `${AWS_PROFILE}`), regions ${ECR_REGION}
+  (pipeline/ECR; auth token minted via `--region ${ECR_TOKEN_REGION}`) and ${AWS_REGION}
+  (cluster, if validating against `${EKS_CLUSTER}`).
+- `kubectl` context for `${EKS_CLUSTER}`; the kubeflow mpi-operator CRD
   installed (`kubectl get crd mpijobs.kubeflow.org`).
 - An **accessible git repo** holding the build context (D12 — need not be
   awsome-distributed-ai); `gh` authenticated for the upstream PR.
@@ -468,10 +468,10 @@ version: 0.2
 phases:
   pre_build:
     commands:
-      # Auth token minted in us-east-1 (account requirement); registry host + repo are us-east-2
-      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 159553542841.dkr.ecr.us-east-2.amazonaws.com
+      # Auth token minted in ${ECR_TOKEN_REGION} (account requirement); registry host + repo are ${ECR_REGION}
+      - aws ecr get-login-password --region ${ECR_TOKEN_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com
       - export GITSHA=$(git rev-parse --short HEAD)
-      - export IMG=159553542841.dkr.ecr.us-east-2.amazonaws.com/smml-containers/deepepv2-nixl-efa:candidate-$GITSHA
+      - export IMG=${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:candidate-$GITSHA
   build:
     commands:
       - |
@@ -533,17 +533,17 @@ Publish only when **all** gates are green: functional tests, throughput floors
 **same digest** (no rebuild), attach the SBOM, write the self-documentation
 labels, and set the registry → repo back-pointer:
 ```bash
-MANIFEST=$(aws ecr batch-get-image --repository-name smml-containers/deepepv2-nixl-efa \
-  --image-ids imageTag=candidate-$GITSHA --region us-east-2 \
-  --profile compute-sa-admin --query 'images[0].imageManifest' --output text)
-aws ecr put-image --repository-name smml-containers/deepepv2-nixl-efa \
+MANIFEST=$(aws ecr batch-get-image --repository-name ${PUBLISH_REPO} \
+  --image-ids imageTag=candidate-$GITSHA --region ${ECR_REGION} \
+  --profile ${AWS_PROFILE} --query 'images[0].imageManifest' --output text)
+aws ecr put-image --repository-name ${PUBLISH_REPO} \
   --image-tag nixl1.5.0-deepepv2-efa1.50.0 --image-manifest "$MANIFEST" \
-  --region us-east-2 --profile compute-sa-admin
+  --region ${ECR_REGION} --profile ${AWS_PROFILE}
 # registry → git repo back-pointer + purpose/run (D12, D13)
 aws ecr put-repository-catalog-data \
-  --repository-name smml-containers/deepepv2-nixl-efa \
+  --repository-name ${PUBLISH_REPO} \
   --catalog-data 'about=Built from https://github.com/<org>/<repo>/tree/<path>. Purpose: 2-node GPU-collective benchmarking (NCCL/DeepEP V2/NIXL over EFA). Run: see repo README.' \
-  --region us-east-2 --profile compute-sa-admin
+  --region ${ECR_REGION} --profile ${AWS_PROFILE}
 ```
 The `org.opencontainers.image.source`, `run.purpose` and `run.command` labels
 (§7.3) are baked at build time, so the published image is self-describing.
@@ -575,7 +575,7 @@ SBOM/license/self-doc) is identical regardless of where the repo is hosted.
 ## 9. IAM & security
 
 - **CodeBuild service role:** `ecr:GetAuthorizationToken`, push/pull on the
-  `smml-containers/deepepv2-nixl-efa` repo, `ecr:PutImage` +
+  `${PUBLISH_REPO}` repo, `ecr:PutImage` +
   `ecr:PutRepositoryCatalogData` (the publish retag + registry back-pointer),
   read the build-context secret, and `sts:AssumeRole`
   into the **cluster-access role** for the validate stage. No standing cluster
@@ -599,13 +599,13 @@ SBOM/license/self-doc) is identical regardless of where the repo is hosted.
 
 ## 10. Resolved decisions
 
-1. **Validation region = cross-region to ap-southeast-3.** The pipeline runs in
-   us-east-2 but validation runs against the existing cgk cluster
-   (`shared-eks-cluster-cgk`, ap-southeast-3). CodeBuild's validate stage uses a
-   cross-region `kubectl` context; no us-east-2 p5en nodegroup is stood up.
-2. **CodeBuild → cluster reach:** the build role's access entry into the cgk
-   cluster is **pending** — paragao will confirm the IAM/access-entry mapping
-   after the build stage exists.
+1. **Validation region = cross-region to ${AWS_REGION}.** The pipeline runs in
+   ${ECR_REGION} but validation runs against the existing cluster
+   (`${EKS_CLUSTER}`, ${AWS_REGION}). CodeBuild's validate stage uses a
+   cross-region `kubectl` context; no ${ECR_REGION} p5en nodegroup is stood up.
+2. **CodeBuild → cluster reach:** the build role's access entry into the
+   cluster is **pending** — the repo owner will confirm the IAM/access-entry
+   mapping after the build stage exists.
 3. **Recipe repo is not fixed to awsome-distributed-ai (D12).** The Dockerfile
    may live in any accessible git repo, provided the bidirectional repo↔registry
    pointer (§7.4) holds. The worked example contributes

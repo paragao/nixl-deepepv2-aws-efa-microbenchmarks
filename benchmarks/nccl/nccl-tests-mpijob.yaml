@@ -2,7 +2,7 @@ apiVersion: kubeflow.org/v2beta1
 kind: MPIJob
 metadata:
   name: nccl-tests-baseline
-  namespace: paragao
+  namespace: ${K8S_NAMESPACE}
 spec:
   runPolicy:
     cleanPodPolicy: Running
@@ -21,7 +21,7 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:multiarch-baseline
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:multiarch-baseline
             imagePullPolicy: IfNotPresent
             name: launcher
             resources:
@@ -60,7 +60,7 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:multiarch-baseline
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:multiarch-baseline
             imagePullPolicy: IfNotPresent
             name: worker
             env:

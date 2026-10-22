@@ -1,8 +1,8 @@
 apiVersion: kubeflow.org/v2beta1
 kind: MPIJob
 metadata:
-  name: deepep-v2-internode
-  namespace: paragao
+  name: deepep-baseline
+  namespace: ${K8S_NAMESPACE}
 spec:
   runPolicy:
     cleanPodPolicy: Running
@@ -20,7 +20,7 @@ spec:
                   matchExpressions:
                   - key: training.kubeflow.org/job-name
                     operator: In
-                    values: ["deepep-v2-internode"]
+                    values: ["deepep-baseline"]
                 topologyKey: kubernetes.io/hostname
           nodeSelector:
             node.kubernetes.io/instance-type: p5en.48xlarge
@@ -30,9 +30,9 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:multiarch-baseline
             imagePullPolicy: IfNotPresent
-            name: deepep-v2-internode-launcher
+            name: deepep-baseline-launcher
             resources:
               requests:
                 cpu: "1"
@@ -72,7 +72,7 @@ spec:
                   matchExpressions:
                   - key: training.kubeflow.org/job-name
                     operator: In
-                    values: ["deepep-v2-internode"]
+                    values: ["deepep-baseline"]
                   - key: training.kubeflow.org/job-role
                     operator: In
                     values: ["worker"]
@@ -84,9 +84,9 @@ spec:
             operator: Exists
             effect: NoSchedule
           containers:
-          - image: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0
+          - image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:multiarch-baseline
             imagePullPolicy: IfNotPresent
-            name: deepep-v2-internode-worker
+            name: deepep-baseline-worker
             env:
             - name: NVIDIA_GDRCOPY
               value: "enabled"

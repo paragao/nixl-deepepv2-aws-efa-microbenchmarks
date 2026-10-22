@@ -17,8 +17,8 @@
 # combine ran ~6% peak-to-peak -- hence its dedicated -5% floor.
 
 schema: 1
-image_repo: 159553542841.dkr.ecr.ap-southeast-3.amazonaws.com/paragao/nixl-deepep-efa
-publish_repo: 159553542841.dkr.ecr.us-east-2.amazonaws.com/smml-containers/deepepv2-nixl-efa
+image_repo: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+publish_repo: ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}
 nodes: 2
 node_type: p5en.48xlarge
 ranks: 16
