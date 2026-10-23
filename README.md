@@ -50,9 +50,9 @@ DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
   -t <registry>/nixl-deepep-efa:dev .
 ```
 
-The build is self-checking: in-build gates fail the build if the GIN NCCL
-library is stale or a backend plugin is missing, so a green build is already
-partly validated. Push to your registry when it succeeds:
+The build is self-checking: the build fails if the NCCL-GIN library is stale or
+a backend plugin is missing. A green build is already partly validated when the
+build succeeds. Push to your registry:
 
 ```bash
 docker push <registry>/nixl-deepep-efa:dev
@@ -78,16 +78,26 @@ python3 awslabs-contrib/architectures/containers/deepv2-nixl-efa/check_licenses.
 - 2 × `p5en.48xlarge` nodes in an EKS cluster, EFA-enabled.
 - **GPU driver flags on the nodes** (required for DeepEP V2 GIN / EFA-GDA):
   `NVreg_EnableStreamMemOPs=1` and `NVreg_RegistryDwords="PeerMappingOverride=1;"`.
-  Bake these into the nodegroup launch template userData so replacement nodes
-  keep them. Verify on a node:
+  DeepEP V2 lets the GPU drive network transfers itself, with no CPU in the
+  loop (GPU-initiated networking). That needs two driver features that are off
+  by default:
+  - `NVreg_EnableStreamMemOPs=1` lets GPU kernels wait on and write memory
+    flags directly. The GPU uses this to signal "data sent" and "data arrived".
+  - `PeerMappingOverride=1` lets the EFA NIC map the GPU's memory (MMIO)
+    so the NIC and GPU can talk directly.
+
+  Without them, GIN fails with `DevComm setup failed on all available backends`.
+  Bake them into the nodegroup launch template userData; a reboot alone does not
+  stick, because replaced nodes come back without them. Verify on a node:
   ```bash
   grep -E "EnableStreamMemOPs|RegistryDwords" /proc/driver/nvidia/params
   ```
 - The kubeflow **mpi-operator** CRD installed (`kubectl get crd mpijobs.kubeflow.org`).
 - The built image pushed to a registry your cluster can pull.
 
-Fill in your environment first, then apply. The manifests carry `${VAR}`
-placeholders, so pipe each through `envsubst`:
+Edit the `env.sh` file with your environment variables first, then apply it
+using `envsubst`. The manifests carry `${VAR}` placeholders that get replaced
+with your own environment variables:
 
 ```bash
 cp env.example.sh env.sh      # then edit env.sh with your values
