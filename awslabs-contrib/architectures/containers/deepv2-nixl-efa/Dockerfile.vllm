@@ -385,6 +385,18 @@ sys.exit(0 if ok else (print('FATAL: torch or GIN NCCL changed, or vllm missing'
     echo "pip check (torch -> its pinned nvidia-nccl-cu13 is the one expected conflict):"; \
     pip3 check || true
 
+# FlashInfer precompiled kernels (flashinfer-cubin + flashinfer-jit-cache), as in vLLM's own
+# docker/Dockerfile. Without them FlashInfer JIT-compiles at server start and logs
+# "precompiled kernels are missing". The torch/NCCL assert proves the download did not move them.
+RUN set -e; \
+    TORCH_BEFORE="$(python3 -c 'from importlib.metadata import version; print(version("torch"))')"; \
+    flashinfer download-kernels --cuda-version ${TORCH_CUDA_INDEX}; \
+    python3 -c "import sys; from importlib.metadata import version as v; \
+t, n, c = v('torch'), v('nvidia-nccl-cu13'), v('flashinfer-cubin'); j = v('flashinfer-jit-cache'); \
+print('torch', t, '| nvidia-nccl-cu13', n, '| flashinfer-cubin', c, '| flashinfer-jit-cache', j); \
+sys.exit(0 if t == '${TORCH_BEFORE}' and n == '${NCCL_VERSION}' else (print('FATAL: torch or GIN NCCL changed') or 1))"; \
+    rm -rf /root/.cache/pip
+
 # ---------------------------------------------------------------------------
 # FINAL layer: re-assert the GIN-capable NCCL and PROVE it at the .so level.
 #
