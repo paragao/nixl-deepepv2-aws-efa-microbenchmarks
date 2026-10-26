@@ -16,6 +16,16 @@ The [`Dockerfile`](./Dockerfile) is written as a **template**: each technology
 has its own clearly labelled section, so you can lift one integration (NIXL,
 UCX, nccl-tests) into your own image.
 
+### Two images, pick one
+
+| Dockerfile | What you get | Use it for |
+|---|---|---|
+| [`Dockerfile`](./Dockerfile) | DeepEP V2 + NIXL + EFA, torch 2.11.0, Python 3.10 | microbenchmarks (DeepEP, NIXL, NCCL tests) |
+| [`Dockerfile.vllm`](./Dockerfile.vllm) | everything above **plus vLLM**, torch 2.14.0, Python 3.12 | serving models with vLLM, incl. disaggregated prefill/decode with `NixlConnector` over EFA |
+
+Both share the same EFA 1.50.0 / GIN NCCL 2.31.2 / NIXL v1.5.0 / DeepEP V2
+stack and the same in-build gates. See [vLLM image](#vllm-image-dockerfilevllm) below.
+
 ---
 
 ## Image contents
@@ -166,6 +176,94 @@ determine the image.
 | `NCCL_TESTS_REF` | `master` | nccl-tests |
 | `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3` | GPU arch (Hopper+Blackwell+GB) |
 | `NVCC_GENCODE` | `...compute_90,sm_90 ...compute_100,sm_100 ...compute_103,sm_103` | codegen |
+
+---
+
+## vLLM image (`Dockerfile.vllm`)
+
+[`Dockerfile.vllm`](./Dockerfile.vllm) is the same recipe with vLLM added on top.
+It keeps every gate of the base image (GIN NCCL `.so` check, squash, hygiene,
+import checks) and adds its own.
+
+### What changes vs `Dockerfile`
+
+| Item | `Dockerfile` | `Dockerfile.vllm` | Why |
+|---|---|---|---|
+| Python | 3.10 (jammy) | 3.12 (deadsnakes PPA) | vLLM wheels need Python >= 3.11. `/usr/bin/python3` stays 3.10 for apt; `python3` on `PATH` is 3.12 |
+| PyTorch | 2.11.0 | 2.14.0 | the exact torch the pinned vLLM wheel requires |
+| vLLM | – | nightly `c50aca14` (0.32.1rc1.dev435) | contains the FA4 SM90 split-KV fix |
+| Lock file | – | [`vllm-requirements.txt`](./vllm-requirements.txt) | vLLM's full dependency closure, installed with `pip --no-deps` |
+
+vLLM and torch pin an older, GIN-less `nvidia-nccl-cu13`. A plain `pip install vllm`
+would silently replace the GIN NCCL 2.31.2 that DeepEP V2 is built against. So
+the image installs the pinned lock with `--no-deps` (torch, NCCL and vLLM are left
+out of it) and then asserts torch and NCCL did not move.
+
+### Why the nightly and not v0.32.0
+
+vLLM v0.32.0 ships FA4 code from just before
+[flash-attention#198](https://github.com/vllm-project/flash-attention/pull/198).
+On SM90 (H100/H200) its split-KV decode kernel makes one split do all the work.
+Measured on Gemma-4-31B-IT, 8x H200, ISL 14000 / OSL 1000:
+
+| TPOT p50, 1 user | v0.25.1 | v0.32.0 | nightly c50aca14 |
+|---|---|---|---|
+| TP8, FA4 | 5.35 ms | 14.39 ms | 5.37 ms |
+| TP4 DP2, FA4 | 6.18 ms | 14.85 ms | 6.18 ms |
+
+The build fails if the fix is missing (`VLLM_REQUIRE_FA4_SM90_FIX=1`).
+
+### Build
+
+```bash
+cd architectures/containers/deepv2-nixl-efa
+DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
+  --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
+  --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
+  -t <registry>/deepv2-nixl-efa:vllm-nightly-c50aca14 .
+```
+
+Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh` and `vllm-requirements.txt`.
+
+### vLLM build arguments
+
+| ARG | Default | Role |
+|---|---|---|
+| `PYTHON_VERSION` | `3.12` | interpreter vLLM runs on |
+| `TORCH_VERSION` | `2.14.0` | must equal the vLLM wheel's `torch==` pin |
+| `VLLM_WHEEL_URL` | nightly `c50aca14` x86_64 wheel on `wheels.vllm.ai` | the vLLM wheel |
+| `VLLM_WHEEL_SHA256` | `d999df48…` | wheel integrity check |
+| `VLLM_VERSION` | `0.32.1rc1.dev435+gc50aca144` | asserted after install |
+| `VLLM_REQUIRE_FA4_SM90_FIX` | `1` | fail the build if the FA4 SM90 fix is absent |
+
+To pin a different vLLM: change `VLLM_WHEEL_URL`, `VLLM_WHEEL_SHA256`,
+`VLLM_VERSION` and `TORCH_VERSION` together, and regenerate
+`vllm-requirements.txt` with the `uv pip compile` command in its header.
+
+### Run vLLM
+
+The image has no `ENTRYPOINT` for vLLM; start it explicitly:
+
+```bash
+vllm serve <model> --tensor-parallel-size 8 \
+  --attention-backend FLASH_ATTN --attention-config '{"flash_attn_version": 4}'
+```
+
+Disaggregated prefill/decode across nodes uses NIXL's LIBFABRIC backend over EFA:
+
+```bash
+# prefill
+vllm serve <model> --tensor-parallel-size 4 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}'
+# decode
+vllm serve <model> --tensor-parallel-size 4 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
+```
+
+Request all 16 EFA devices per pod. In the logs expect
+`Backend LIBFABRIC was instantiated` once per TP rank and
+`Created 16 rails using provider=efa`. Harmless: `nixl-cu13 is not installed`
+(NIXL's expert-parallel module, unused by vLLM's KV transfer).
 
 ---
 
