@@ -265,6 +265,56 @@ Request all 16 EFA devices per pod. In the logs expect
 `Created 16 rails using provider=efa`. Harmless: `nixl-cu13 is not installed`
 (NIXL's expert-parallel module, unused by vLLM's KV transfer).
 
+### Validated build
+
+Built from this branch at commit `8ef758f` (rootless BuildKit, `--no-cache`, 35 min) and pushed as:
+
+```
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm-nightly-c50aca14-fi
+@sha256:5b009bee64393c41ef0ce06de0d1cef95b5955dca05c248c60d945d1967576c8
+```
+
+About 11.7 GB compressed, one squashed layer, linux/amd64. Every in-build gate passed:
+
+| Gate | Result |
+|---|---|
+| torch-layer and squashed `libnccl.so.2` | GIN 2.31.2, exports `ncclCommQueryProperties` |
+| vLLM block | `torch 2.14.0+cu130 \| nvidia-nccl-cu13 2.31.2 \| vllm 0.32.1rc1.dev435+gc50aca144` |
+| FA4 SM90 fix | `OK: FA4 SM90 split-KV fix present` |
+| FlashInfer kernels | `flashinfer-cubin 0.7.2 \| flashinfer-jit-cache 0.7.2+cu130` |
+| DeepEP V2 / NIXL | `import deep_ep` OK, LIBFABRIC plugin present, `nixl_test` present |
+| hygiene | autocommand, my-test-package, devscripts removed |
+
+GPU check on p5en.48xlarge (8x H200): torch sees 8 GPUs, vLLM uses NCCL 2.31.2, NIXL lists
+LIBFABRIC/POSIX/UCX, and the server log has no "FlashInfer's precompiled kernels are missing" line.
+
+### Measured performance
+
+Gemma-4-31B-IT, ISL 14000 / OSL 1000, client `vllm bench serve` (`--dataset-name random --ignore-eos`).
+Mean over 3 seeds of each run's p50. Every run uses a new seed, so prefix-cache hits are 0%.
+
+TP8, `--attention-backend FLASH_ATTN --attention-config '{"flash_attn_version": 4}'`, fp8 weights, bf16 KV
+(TTFT ms / TPOT ms / total tok/s):
+
+| Users | This image | Stock `vllm/vllm-openai` nightly c50aca14 | vLLM v0.25.1 | vLLM v0.32.0 |
+|---|---|---|---|---|
+| 1 | 319 / 5.38 / 2,636 | 320 / 5.37 / 2,643 | 331 / 5.35 / 2,644 | 329 / 14.39 / 1,021 |
+| 32 | 1,466 / 15.37 / 28,465 | 1,534 / 15.33 / 28,447 | 1,534 / 15.76 / 27,641 | 1,038 / 23.15 / 19,737 |
+
+The image matches stock vLLM nightly within 0.4% and carries NIXL over EFA, which stock vLLM images
+cannot do (they ship no libfabric).
+
+Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (vLLM 0.32.0 on the same base;
+LIBFABRIC on every rank, 0 UCX, 16 EFA rails, 0 failed transfers):
+
+| Users | TP4 prefill + TP4 decode | TP8 prefill + TP8 decode |
+|---|---|---|
+| 8 | 618 / 15.26 / 7,035 | 499 / 14.56 / 7,447 |
+| 32 | 637 / 17.75 / 23,205 | 504 / 16.58 / 25,946 |
+| 128 | 32,817 / 19.14 / 33,273 | 10,635 / 21.04 / 51,216 |
+
+Gemma-4-31B is dense, so DeepEP V2 (MoE expert-parallel) is present but not exercised by these tests.
+
 ---
 
 ## Validate (2 nodes)
