@@ -40,25 +40,50 @@
 #     VLLM_WHEEL_URL, VLLM_VERSION and TORCH_VERSION together and regenerate
 #     vllm-requirements.txt (command in its header).
 #
-# Build context: Dockerfile.vllm, setup_deepep_gin.sh, vllm-requirements.txt
+# Build context: Dockerfile.vllm, setup_deepep_gin.sh, vllm-requirements.txt,
+#   build-requirements.txt, flashinfer-kernels.txt, deadsnakes.asc
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
 #     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
 #     -t <registry>/<repo>/nixl-deepep-efa:vllm-nightly-c50aca14 .
 
+#
+# Pinning: every input is pinned to exact bytes so a rebuild of this file gives the
+# same image. Git sources are pinned to a full commit SHA (a tag or branch can move;
+# where a tag is kept for readability the build asserts it still points at the SHA).
+# Downloads are sha256-checked. pip installs use --require-hashes. The base image is
+# pinned by digest. To move a pin, change the ARG and its SHA/sha256 together.
+
 ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
+# Multi-arch index digest of nvidia/cuda:13.0.2-devel-ubuntu22.04 (2026-10-27).
+ARG CUDA_IMAGE_DIGEST=sha256:1c517d4fb96528c8999e14e6e6b16d7e2ff9ae8d194fd788d60fdc88e693e982
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04@${CUDA_IMAGE_DIGEST} AS builder
 
 ARG GDRCOPY_VERSION=v2.5.2
+ARG GDRCOPY_COMMIT=c91ad9f178e5fb729fc5b6dc62a77c3bb364d6c9
 ARG EFA_INSTALLER_VERSION=1.50.0
-ARG DEEPEP_REF="main"
+ARG EFA_INSTALLER_SHA256=fa6dff8593d866866c13cb4640d9059835cd4efa427971f100ab40c97bef2841
+# amazon-contributing/DeepEP main as of the validated build (2026-10-24 18:47 UTC).
+ARG DEEPEP_REF="d75f22a5e07c95eb0bae94ad6445a5009c06c886"
 ARG NCCL_VERSION=2.31.2
+# nvidia_nccl_cu13-2.31.2-py3-none-manylinux_2_18_x86_64.whl (PyPI)
+ARG NCCL_WHEEL_SHA256=0bcaf0308854cb55fcc35af72e2c83143f3b71e65a4e865e2c586b1cdcdb5ae0
 ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.14.0
 ARG TORCH_CUDA_INDEX=cu130
-# NIXL release to build (git tag in ai-dynamo/nixl). v1.5.0 = 1683cf3 (2026-09-30).
+# torch-2.14.0+cu130-cp312-cp312-manylinux_2_28_x86_64.whl (download.pytorch.org)
+ARG TORCH_WHEEL_SHA256=9c5693d3ca91743202034094ad3b3df20b5eb1373d5e0bc8a5d976be12c35302
+# NIXL release to build (git tag in ai-dynamo/nixl), asserted to be this commit.
 ARG NIXL_REF="v1.5.0"
-# UCX version NIXL is tested against (README: 1.23.x). NIXL's UCX plugin needs it.
-ARG UCX_VERSION="v1.23.x"
+ARG NIXL_COMMIT=1683cf3b7f3d11674c03c5e861cea22339876c96
+# nixl-1.5.0-py3-none-any.whl, the thin meta-wheel (PyPI). Must match NIXL_REF.
+ARG NIXL_META_SHA256=1be21929dcf331b7637e4daafd538169c70467b0dfb9445621b4036e4831fb38
+# UCX v1.23.x branch head as of the validated build (2026-10-25 17:09 UTC); NIXL
+# is tested against 1.23.x and v1.23.x has no final release tag yet.
+ARG UCX_VERSION="425fb1bcf0f26a92364247a359130090fdc1ecd0"
+# pypa/get-pip commit "Update to 26.2.2"; the file itself is sha256-checked too.
+ARG GET_PIP_COMMIT=fa4e90301bf000c36309f3ad79c3ac720b55d6df
+ARG GET_PIP_SHA256=f4448a01e3ab2914c65f4ca59d4cacba6b2dbde19a483fbac46587f8bbaff424
+ARG PIP_VERSION=26.2.2
 
 # CUDA architecture(s), semicolon-separated. Compute-capability mapping:
 #   9.0  = Hopper          -> H100 / H200          (sm_90)
@@ -91,8 +116,18 @@ RUN rm -rf /opt/hpcx \
     && ldconfig
 
 # vllm: python${PYTHON_VERSION} (3.12) for Ubuntu 22.04 comes from the deadsnakes PPA.
-RUN apt-get install -y software-properties-common \
-    && for i in 1 2 3; do add-apt-repository -y ppa:deadsnakes/ppa && break || sleep 10; done \
+# Added by hand, NOT with add-apt-repository: that needs software-properties-common,
+# which drags ~15 apt Python packages into /usr/lib/python3 (launchpadlib, lazr-*,
+# python-apt, pygobject, dbus-python, keyring, ...) that the license gate blocks
+# and nothing at run time uses. The PPA signing key is vendored (deadsnakes.asc,
+# fingerprint F23C5A6CF475977595C89F51BA6932366A755776, checked below) so the build
+# neither fetches it from a keyserver nor trusts whatever key it is served.
+ARG DEADSNAKES_KEY_SHA256=08188a76c63fc4d0707570076ca035f049dd4ce574cd85612d8c124e4bd045cf
+RUN --mount=type=bind,source=deadsnakes.asc,target=/tmp/deadsnakes.asc \
+    echo "${DEADSNAKES_KEY_SHA256}  /tmp/deadsnakes.asc" | sha256sum -c - \
+    && install -D -m 0644 /tmp/deadsnakes.asc /etc/apt/keyrings/deadsnakes.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.asc] https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu jammy main" \
+         > /etc/apt/sources.list.d/deadsnakes.list \
     && apt-get update -y
 
 RUN apt-get install -y --no-install-recommends \
@@ -127,16 +162,26 @@ RUN sed -i 's/[ #]\(.*StrictHostKeyChecking \).*/ \1no/g' /etc/ssh/ssh_config &&
 
 # vllm: `python3` on PATH -> python${PYTHON_VERSION}. /usr/local/bin precedes /usr/bin,
 # so build steps and the runtime get 3.12 while /usr/bin/python3 (3.10) stays for apt.
-RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
-    && curl https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-    && python3 /tmp/get-pip.py \
-    && pip3 install awscli nvidia-ml-py ninja
+# get-pip.py comes from a fixed pypa/get-pip commit (not the moving bootstrap URL),
+# is sha256-checked, and installs an exact pip. build-requirements.txt is the hashed
+# closure of the build tools (awscli, nvidia-ml-py, ninja, meson, pybind11, tomlkit),
+# at the same versions as vllm-requirements.txt where they overlap.
+RUN --mount=type=bind,source=build-requirements.txt,target=/tmp/build-requirements.txt \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
+    && curl --retry 3 --retry-delay 2 -fsSL -o /tmp/get-pip.py \
+       https://raw.githubusercontent.com/pypa/get-pip/${GET_PIP_COMMIT}/public/get-pip.py \
+    && echo "${GET_PIP_SHA256}  /tmp/get-pip.py" | sha256sum -c - \
+    && python3 /tmp/get-pip.py "pip==${PIP_VERSION}" \
+    && rm -f /tmp/get-pip.py \
+    && pip3 install --no-cache-dir --require-hashes -r /tmp/build-requirements.txt
 
 #################################################
 ## Install NVIDIA GDRCopy
 ARG GDRCOPY_PREFIX="/opt/gdrcopy"
 RUN git clone -b ${GDRCOPY_VERSION} https://github.com/NVIDIA/gdrcopy.git /tmp/gdrcopy \
     && cd /tmp/gdrcopy \
+    && test "$(git rev-parse HEAD)" = "${GDRCOPY_COMMIT}" \
+       || { echo "FATAL: gdrcopy ${GDRCOPY_VERSION} is $(git rev-parse HEAD), expected ${GDRCOPY_COMMIT}"; exit 1; } \
     && make prefix="${GDRCOPY_PREFIX}" install \
     && rm -rf /tmp/gdrcopy
 ENV LD_LIBRARY_PATH="${GDRCOPY_PREFIX}/lib:$LD_LIBRARY_PATH"
@@ -149,6 +194,7 @@ ENV PATH="${GDRCOPY_PREFIX}/bin:$PATH"
 RUN cd $HOME && \
     curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
     https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+    echo "${EFA_INSTALLER_SHA256}  aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" | sha256sum -c - && \
     tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
     cd aws-efa-installer && \
     apt-get update && \
@@ -176,9 +222,19 @@ ENV PMIX_MCA_gds=hash
 # as a standalone layer blob -- otherwise BuildKit's content-addressed export keeps
 # deduping the final committed .so back to that stale 218MB blob (observed v4-v8,
 # including with --no-cache, which disables step caching but not blob dedup).
-RUN pip3 install torch==${TORCH_VERSION} numpy --index-url https://download.pytorch.org/whl/${TORCH_CUDA_INDEX} \
+# The torch wheel itself is sha256-checked. Its dependency closure is resolved here
+# for the DeepEP/NIXL builds, then re-pinned to the hashed vllm-requirements.txt in
+# the vLLM block (--no-deps), so the shipped versions come from the hashed lock.
+# The GIN NCCL wheel is installed from a one-line hashed requirement.
+RUN TORCH_WHL="/tmp/torch-${TORCH_VERSION}+${TORCH_CUDA_INDEX}-cp312-cp312-manylinux_2_28_x86_64.whl" \
+    && curl --retry 3 --retry-delay 2 -fsSL -o "${TORCH_WHL}" \
+       "https://download.pytorch.org/whl/${TORCH_CUDA_INDEX}/torch-${TORCH_VERSION}%2B${TORCH_CUDA_INDEX}-cp312-cp312-manylinux_2_28_x86_64.whl" \
+    && echo "${TORCH_WHEEL_SHA256}  ${TORCH_WHL}" | sha256sum -c - \
+    && pip3 install --no-cache-dir "${TORCH_WHL}" numpy==2.3.5 --index-url https://download.pytorch.org/whl/${TORCH_CUDA_INDEX} \
+    && rm -f "${TORCH_WHL}" \
     && CUDA_MAJOR=$(nvcc --version | grep -oP 'release \K[0-9]+') \
-    && pip3 install --no-deps --no-cache-dir --force-reinstall "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+    && printf 'nvidia-nccl-cu%s==%s --hash=sha256:%s\n' "${CUDA_MAJOR}" "${NCCL_VERSION}" "${NCCL_WHEEL_SHA256}" > /tmp/nccl-req.txt \
+    && pip3 install --no-deps --no-cache-dir --force-reinstall --require-hashes -r /tmp/nccl-req.txt \
     && SO="$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/libnccl.so.2' | head -1)" \
     && nm -D "$SO" 2>/dev/null | grep -q ncclCommQueryProperties \
        && echo "OK: torch-layer libnccl.so.2 is GIN ${NCCL_VERSION}" \
@@ -190,7 +246,8 @@ RUN pip3 install torch==${TORCH_VERSION} numpy --index-url https://download.pyto
 RUN --mount=type=bind,source=setup_deepep_gin.sh,target=/tmp/setup_deepep_gin.sh \
     pip3 uninstall -y nvidia-nccl-cu13 nvidia-nccl-cu12 nvidia-nccl 2>/dev/null || true && \
     CUDA_MAJOR=$(nvcc --version | grep -oP 'release \K[0-9]+') && \
-    pip3 install --no-deps nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION} && \
+    printf 'nvidia-nccl-cu%s==%s --hash=sha256:%s\n' "${CUDA_MAJOR}" "${NCCL_VERSION}" "${NCCL_WHEEL_SHA256}" > /tmp/nccl-req.txt && \
+    pip3 install --no-deps --require-hashes -r /tmp/nccl-req.txt && \
     TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
     /tmp/setup_deepep_gin.sh \
     --deepep-ref $DEEPEP_REF \
@@ -209,7 +266,8 @@ ENV NCCL_TUNER_PLUGIN=ofi
 # installed by the awslabs base, so the binaries exercise the real EFA transport.
 # Binaries install to /opt/nccl-tests/build and are put on PATH. The build links
 # MPI (/opt/amazon/openmpi) so the perf tests can launch multi-rank with mpirun.
-ARG NCCL_TESTS_REF="master"
+# NVIDIA/nccl-tests master as of the validated build ("bump nccl-tests version to 2.21.1").
+ARG NCCL_TESTS_REF="afd59abab774a6a4b492eb344bd0c845a0b7bb4d"
 ARG NCCL_TESTS_PREFIX="/opt/nccl-tests"
 # Resolve the GIN NCCL root = the pip torch NCCL (nvidia/nccl), which ships
 # libnccl.so.2 (2.31.2, GIN-capable) + include/nccl.h. We must link against THIS,
@@ -245,6 +303,8 @@ ARG UCX_PREFIX="/opt/ucx"
 RUN git clone https://github.com/openucx/ucx.git /tmp/ucx \
     && cd /tmp/ucx \
     && git checkout ${UCX_VERSION} \
+    && git merge-base --is-ancestor HEAD origin/v1.23.x \
+       || { echo "FATAL: UCX ${UCX_VERSION} is not on the v1.23.x branch"; exit 1; } \
     && ./autogen.sh \
     && ./contrib/configure-release-mt \
         --prefix=${UCX_PREFIX} \
@@ -274,7 +334,8 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
         libhwloc-dev \
         libnuma-dev \
     && rm -rf /var/lib/apt/lists/*
-RUN pip3 install meson ninja pybind11 tomlkit
+# meson, meson-python, ninja, pybind11 and tomlkit come from build-requirements.txt
+# (hashed, installed with pip above).
 
 # Make the EFA installer's libfabric discoverable to meson/pkg-config.
 ENV PKG_CONFIG_PATH="/opt/amazon/efa/lib/pkgconfig:/opt/amazon/efa/lib64/pkgconfig:${PKG_CONFIG_PATH}"
@@ -298,6 +359,8 @@ ARG NIXL_PREFIX="/opt/nixl"
 RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     && cd /tmp/nixl \
     && git checkout ${NIXL_REF} \
+    && test "$(git rev-parse HEAD)" = "${NIXL_COMMIT}" \
+       || { echo "FATAL: NIXL ${NIXL_REF} is $(git rev-parse HEAD), expected ${NIXL_COMMIT}"; exit 1; } \
     && git submodule update --init --recursive \
     && meson setup /tmp/nixl/build \
         --prefix=${NIXL_PREFIX} \
@@ -343,11 +406,20 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     # 2.31.2 that DeepEP V2 was compiled against, which breaks `import deep_ep` with
     # `undefined symbol: ncclCommQueryProperties` (a 2.31 GIN symbol). --no-deps keeps
     # the pinned GIN NCCL intact; torch/numpy are already present from the base.
-    && pip3 install --no-deps /tmp/nixl \
+    # --no-build-isolation (as NIXL's own contrib/build-wheel.sh does): the isolated
+    # build env would fetch unpinned build deps, including `torch==2.11.*` from
+    # pyproject.toml, and compile the bindings against that torch instead of the
+    # image's. Without isolation they build with the hashed tools from
+    # build-requirements.txt and the image's torch.
+    && pip3 install --no-deps --no-build-isolation /tmp/nixl \
     && cd / && rm -rf /tmp/nixl \
     # Install the thin `nixl` meta-wheel so BOTH `import nixl` and the variant
     # `import nixl_cu13` work (source builds name the module nixl_cu13).
-    && pip3 install --no-deps nixl
+    # Pinned to NIXL_REF's version with its sha256 (unpinned, it would pull a
+    # newer nixl meta-wheel than the source just built).
+    && printf 'nixl==%s --hash=sha256:%s\n' "${NIXL_REF#v}" "${NIXL_META_SHA256}" > /tmp/nixl-meta.txt \
+    && pip3 install --no-deps --require-hashes -r /tmp/nixl-meta.txt \
+    && rm -f /tmp/nixl-meta.txt
 
 #################################### vLLM #######################################
 # vLLM pins an exact torch (installed above as TORCH_VERSION), and torch pins an older
@@ -364,7 +436,7 @@ ARG VLLM_REQUIRE_FA4_SM90_FIX=1
 RUN --mount=type=bind,source=vllm-requirements.txt,target=/tmp/vllm-requirements.txt \
     set -e; \
     TORCH_BEFORE="$(python3 -c 'from importlib.metadata import version; print(version("torch"))')"; \
-    pip3 install --no-deps --no-cache-dir \
+    pip3 install --no-deps --no-cache-dir --require-hashes \
         --index-url https://pypi.org/simple \
         --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA_INDEX} \
         -r /tmp/vllm-requirements.txt; \
@@ -387,10 +459,17 @@ sys.exit(0 if ok else (print('FATAL: torch or GIN NCCL changed, or vllm missing'
 
 # FlashInfer precompiled kernels (flashinfer-cubin + flashinfer-jit-cache), as in vLLM's own
 # docker/Dockerfile. Without them FlashInfer JIT-compiles at server start and logs
-# "precompiled kernels are missing". The torch/NCCL assert proves the download did not move them.
-RUN set -e; \
+# "precompiled kernels are missing". The torch/NCCL assert proves the install did not move them.
+# Installed from flashinfer-kernels.txt (exact versions + sha256, --no-deps) instead of
+# `flashinfer download-kernels`, which runs an unhashed `pip install --upgrade` WITH deps
+# against flashinfer.ai and pulls every arch (sm80/sm89/sm120f too, ~408 MB unused here).
+# Only the providers for this image's arches (sm90a/sm100a/sm103a) are listed.
+RUN --mount=type=bind,source=flashinfer-kernels.txt,target=/tmp/flashinfer-kernels.txt \
+    set -e; \
     TORCH_BEFORE="$(python3 -c 'from importlib.metadata import version; print(version("torch"))')"; \
-    flashinfer download-kernels --cuda-version ${TORCH_CUDA_INDEX}; \
+    pip3 install --no-deps --no-cache-dir --require-hashes \
+        --index-url https://flashinfer.ai/whl/${TORCH_CUDA_INDEX} --extra-index-url https://flashinfer.ai/whl \
+        -r /tmp/flashinfer-kernels.txt; \
     python3 -c "import sys; from importlib.metadata import version as v; \
 t, n, c = v('torch'), v('nvidia-nccl-cu13'), v('flashinfer-cubin'); j = v('flashinfer-jit-cache'); \
 print('torch', t, '| nvidia-nccl-cu13', n, '| flashinfer-cubin', c, '| flashinfer-jit-cache', j); \
@@ -400,7 +479,7 @@ sys.exit(0 if t == '${TORCH_BEFORE}' and n == '${NCCL_VERSION}' else (print('FAT
 # ---------------------------------------------------------------------------
 # FINAL layer: re-assert the GIN-capable NCCL and PROVE it at the .so level.
 #
-# Why its own layer (not chained into the NIXL RUN): torch==2.11.0 (step #16)
+# Why its own layer (not chained into the NIXL RUN): torch (the torch layer above)
 # bundles the GIN-LESS nvidia-nccl-cu13 2.28.9, whose libnccl.so.2 is written to
 # .../nvidia/nccl/lib/ in a layer that gets CACHED/deduped. A `pip install` of
 # 2.31.2 chained inside the big NIXL RUN updated the dist-info metadata but the
@@ -417,7 +496,9 @@ ARG NCCL_REPIN_BUST=v12
 # ncclCommQueryProperties) over it. The build is run with --no-cache so no stale
 # 2.28.9 layer survives for BuildKit to dedup the committed .so back to.
 RUN pip3 uninstall -y nvidia-nccl-cu13 2>/dev/null || true; \
-    pip3 install --no-deps --no-cache-dir --force-reinstall "nvidia-nccl-cu13==2.31.2"; \
+    printf 'nvidia-nccl-cu13==%s --hash=sha256:%s\n' "${NCCL_VERSION}" "${NCCL_WHEEL_SHA256}" > /tmp/nccl-req.txt; \
+    pip3 install --no-deps --no-cache-dir --force-reinstall --require-hashes -r /tmp/nccl-req.txt; \
+    rm -f /tmp/nccl-req.txt; \
     SO="$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/libnccl.so.2' 2>/dev/null | head -1)"; \
     echo "GIN NCCL .so: $SO"; ls -la "$SO" || { echo "FATAL: libnccl.so.2 not found"; exit 1; }; \
     if nm -D "$SO" 2>/dev/null | grep -q ncclCommQueryProperties; then \
@@ -450,8 +531,7 @@ RUN pip3 uninstall -y nvidia-nccl-cu13 2>/dev/null || true; \
 # by pip), so there is no stale lower-layer copy of that file. The single
 # `COPY --from=builder / /` layer is the ONLY provider of the nccl .so = the GIN
 # 2.31.2 the builder's final (nm-verified) filesystem carries.
-ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS final
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04@${CUDA_IMAGE_DIGEST} AS final
 
 # One COPY overlays the builder's entire final rootfs as a single top layer.
 COPY --from=builder / /
@@ -539,7 +619,15 @@ RUN set -e; \
       && ! find /usr/local/lib /usr/lib -ipath '*my-test-package*' 2>/dev/null | grep -q . \
       && ! dpkg -l devscripts 2>/dev/null | grep -q '^ii' \
       && echo "OK: autocommand + my-test-package + devscripts removed from runtime layer" \
-      || { echo "FAIL: a hygiene target is still present"; exit 1; }
+      || { echo "FAIL: a hygiene target is still present"; exit 1; }; \
+    # 4. vllm: the deadsnakes PPA is added by hand, so software-properties-common and
+    #    the apt Python packages it pulls (launchpadlib, lazr-*, python-apt, pygobject,
+    #    dbus-python, keyring, ...) must never be installed. Fail if any comes back.
+    for p in software-properties-common python3-software-properties python3-launchpadlib \
+             python3-apt python3-gi python3-dbus python3-keyring unattended-upgrades; do \
+        if dpkg -l "$p" 2>/dev/null | grep -q '^ii'; then echo "FAIL: $p is installed"; exit 1; fi; \
+    done; \
+    echo "OK: no software-properties-common / apt Python packages in the runtime layer"
 
 # Final gate on the SQUASHED single-layer image. Assert at the BINARY level
 # (the committed .so must export the GIN symbol) AND at the import level
@@ -584,7 +672,8 @@ sys.exit(0 if vl == '${VLLM_VERSION}' and t.startswith('${TORCH_VERSION}+') else
 
 LABEL org.opencontainers.image.description="vLLM ${VLLM_VERSION} (torch ${TORCH_VERSION}+cu130, Python 3.12) + DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300)"
 LABEL nixl.ref="v1.5.0"
-LABEL deepep.ref="amazon-contributing/DeepEP@main"
+ARG DEEPEP_REF=d75f22a5e07c95eb0bae94ad6445a5009c06c886
+LABEL deepep.ref="amazon-contributing/DeepEP@${DEEPEP_REF}"
 LABEL efa.installer="1.50.0"
 LABEL vllm.version="${VLLM_VERSION}"
 LABEL torch.version="${TORCH_VERSION}+cu130"

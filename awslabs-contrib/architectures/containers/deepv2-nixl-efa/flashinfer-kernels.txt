@@ -1,0 +1,19 @@
+# FlashInfer precompiled kernels for Dockerfile.vllm (pip --no-deps --require-hashes).
+#
+# Versions must equal flashinfer-python in vllm-requirements.txt (0.7.2) and the
+# torch CUDA index (cu130). flashinfer-jit-cache is a 4 KB shim; the kernels live in
+# one provider wheel per GPU arch. Only this image's arches are listed:
+#   sm90a  = Hopper H100/H200        sm100a = Blackwell B200/GB200
+#   sm103a = Blackwell Ultra B300/GB300
+# Hashes are the ones published on the flashinfer.ai index
+# (https://flashinfer.ai/whl and https://flashinfer.ai/whl/cu130).
+flashinfer-cubin==0.7.2 \
+    --hash=sha256:31704fa5b2562d459d34c67cee9e80e0abb96c82f89943d542276d5a92c88079
+flashinfer-jit-cache==0.7.2+cu130 \
+    --hash=sha256:9d17680be42818709696dcf8273c9f3f62e42636caf9b3b4a358e443e8216c20
+flashinfer-jit-cache-sm90a==0.7.2+cu130 \
+    --hash=sha256:538e4f534c45493eba6783ea825c6d6c1d383c2d751f339ceedb78ed7deffa04
+flashinfer-jit-cache-sm100a==0.7.2+cu130 \
+    --hash=sha256:59c41aacab91631a169035348db5899f63e4483b474c39cbec7901d86df49bca
+flashinfer-jit-cache-sm103a==0.7.2+cu130 \
+    --hash=sha256:e05791dcadad995d2582928f2d0fb290fb6741bdc972d297503339cd9d0384e3

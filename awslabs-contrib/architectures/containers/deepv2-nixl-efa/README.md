@@ -209,10 +209,11 @@ import checks) and adds its own.
 
 | Item | `Dockerfile` | `Dockerfile.vllm` | Why |
 |---|---|---|---|
-| Python | 3.10 (jammy) | 3.12 (deadsnakes PPA) | vLLM wheels need Python >= 3.11. `/usr/bin/python3` stays 3.10 for apt; `python3` on `PATH` is 3.12 |
+| Python | 3.10 (jammy) | 3.12 (deadsnakes PPA) | vLLM wheels need Python >= 3.11. `/usr/bin/python3` stays 3.10 for apt; `python3` on `PATH` is 3.12. The PPA is added by hand with a vendored key ([`deadsnakes.asc`](./deadsnakes.asc)), not `add-apt-repository`, so no `software-properties-common` apt Python packages ship |
 | PyTorch | 2.11.0 | 2.14.0 | the exact torch the pinned vLLM wheel requires |
 | vLLM | – | nightly `c50aca14` (0.32.1rc1.dev435) | contains the FA4 SM90 split-KV fix |
-| Lock file | – | [`vllm-requirements.txt`](./vllm-requirements.txt) | vLLM's full dependency closure, installed with `pip --no-deps` |
+| Lock file | – | [`vllm-requirements.txt`](./vllm-requirements.txt) | vLLM's full dependency closure, installed with `pip --no-deps --require-hashes` |
+| Pinning | refs and tags | every input pinned to exact bytes | see [Pinned inputs](#pinned-inputs-dockerfilevllm) |
 
 vLLM and torch pin an older, GIN-less `nvidia-nccl-cu13`. A plain `pip install vllm`
 would silently replace the GIN NCCL 2.31.2 that DeepEP V2 is built against. So
@@ -243,7 +244,8 @@ DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
   -t <registry>/deepv2-nixl-efa:vllm-nightly-c50aca14 .
 ```
 
-Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh` and `vllm-requirements.txt`.
+Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh`, `vllm-requirements.txt`,
+`build-requirements.txt`, `flashinfer-kernels.txt` and `deadsnakes.asc`.
 
 ### vLLM build arguments
 
@@ -257,8 +259,55 @@ Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh` and `vllm-requireme
 | `VLLM_REQUIRE_FA4_SM90_FIX` | `1` | fail the build if the FA4 SM90 fix is absent |
 
 To pin a different vLLM: change `VLLM_WHEEL_URL`, `VLLM_WHEEL_SHA256`,
-`VLLM_VERSION` and `TORCH_VERSION` together, and regenerate
-`vllm-requirements.txt` with the `uv pip compile` command in its header.
+`VLLM_VERSION`, `TORCH_VERSION` and `TORCH_WHEEL_SHA256` together, and regenerate
+`vllm-requirements.txt` (and `build-requirements.txt`) with the commands in their
+headers; [`trim_lock_hashes.py`](./trim_lock_hashes.py) adds the target-only hashes.
+
+### Pinned inputs (`Dockerfile.vllm`)
+
+A rebuild of the same commit fetches the same bytes, or fails.
+
+| Input | Pinned by | ARG / file |
+|---|---|---|
+| base image | digest | `CUDA_IMAGE_DIGEST` |
+| DeepEP V2 | commit SHA | `DEEPEP_REF` |
+| UCX | commit SHA on `v1.23.x` | `UCX_VERSION` |
+| nccl-tests | commit SHA | `NCCL_TESTS_REF` |
+| GDRCopy, NIXL | tag, asserted to equal a commit SHA | `GDRCOPY_COMMIT`, `NIXL_COMMIT` |
+| EFA installer | sha256 | `EFA_INSTALLER_SHA256` |
+| deadsnakes PPA key | vendored file + sha256 | `deadsnakes.asc`, `DEADSNAKES_KEY_SHA256` |
+| get-pip.py, pip | pypa/get-pip commit + sha256, `pip==` | `GET_PIP_COMMIT`, `GET_PIP_SHA256`, `PIP_VERSION` |
+| torch, vLLM wheels | sha256 | `TORCH_WHEEL_SHA256`, `VLLM_WHEEL_SHA256` |
+| GIN NCCL, `nixl` meta-wheel | `==` + sha256 | `NCCL_WHEEL_SHA256`, `NIXL_META_SHA256` |
+| build tools | `--require-hashes` | `build-requirements.txt` |
+| vLLM dependencies | `--require-hashes` | `vllm-requirements.txt` |
+| FlashInfer kernels | `--require-hashes`, sm90a/sm100a/sm103a only | `flashinfer-kernels.txt` |
+
+Two build changes come with the pins. NIXL's Python bindings build with
+`--no-build-isolation` (as NIXL's own `contrib/build-wheel.sh` does), so they use
+the hashed build tools and the image's torch instead of the `torch==2.11.*` that
+NIXL's `pyproject.toml` asks the isolated env for. FlashInfer kernels install from
+`flashinfer-kernels.txt` instead of `flashinfer download-kernels`, which ran an
+unhashed `pip install --upgrade` with dependencies and added ~408 MB of kernels for
+GPUs this image does not target (sm80/sm89/sm120f). apt packages themselves are
+not version-pinned: the deadsnakes PPA keeps only its latest build.
+
+### License gate (`Dockerfile.vllm`)
+
+[`check_licenses.py`](./check_licenses.py) reads licenses as SPDX expressions
+(`A OR B` passes if either side does; `A WITH <exception>` needs the exception under
+`allow_exceptions`). For the vLLM closure, [`validation-gate.yaml`](./validation-gate.yaml)
+adds aliases for free-text license names, upstream-verified pins for wheels with no
+license metadata, and two scoped exceptions:
+
+| Exception | Packages | Licenses | State |
+|---|---|---|---|
+| `permissive-extra` | detect-installer, email-validator, pillow, regex, supervisor | 0BSD, Unlicense, MIT-CMU, CNRI-Python, Repoze | approved |
+| `weak-copyleft-unmodified` | certifi, tqdm, orjson, pycountry | MPL-2.0, LGPL-2.1-only | **pending approval** |
+
+While an exception has `pending_approval: true` the gate prints
+`LICENSE GATE: PENDING-APPROVAL` and exits 2. Run its tests with
+`python3 -m unittest test_check_licenses.py`.
 
 ### Run vLLM
 
@@ -287,7 +336,11 @@ Request all 16 EFA devices per pod. In the logs expect
 
 ### Validated build
 
-Built from this branch at commit `8ef758f` (rootless BuildKit, `--no-cache`, 35 min) and pushed as:
+Built from this branch at commit `2761b8c` (`8ef758f` before the history was
+rewritten to fix the commit author; same tree, and the image's
+`org.opencontainers.image.revision` label still reads `8ef758f`), before the input pinning and the
+deadsnakes / FlashInfer install changes above (rootless BuildKit, `--no-cache`,
+35 min), and pushed as:
 
 ```
 ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm-nightly-c50aca14-fi
