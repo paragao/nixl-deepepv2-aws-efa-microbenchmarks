@@ -16,10 +16,11 @@
 #   - DeepEP V2  -> NCCL GIN (EFA-GDA, type 5) via aws-ofi-nccl
 #   - NIXL 1.5.0 -> LIBFABRIC plugin over the same libfabric/EFA stack
 #
-# Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300):
+# Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300
+#        + Blackwell RTX PRO 6000 (g7e)):
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
-#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
-#     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
+#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
+#     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
 #     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0 .
 #
 # vLLM variant (this file, Dockerfile.vllm): the recipe above plus vLLM, so one image
@@ -43,7 +44,7 @@
 # Build context: Dockerfile.vllm, setup_deepep_gin.sh, vllm-requirements.txt,
 #   build-requirements.txt, flashinfer-kernels.txt, deadsnakes.asc
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
-#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
+#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
 #     -t <registry>/<repo>/nixl-deepep-efa:vllm-nightly-c50aca14 .
 
 #
@@ -89,11 +90,12 @@ ARG PIP_VERSION=26.2.2
 #   9.0  = Hopper          -> H100 / H200          (sm_90)
 #   10.0 = Blackwell DC    -> B200 / B300, GB200   (sm_100)
 #   10.3 = Blackwell Ultra -> B300 / GB300 steppings (sm_103)
+#   12.0 = Blackwell RTX   -> RTX PRO 6000 Blackwell Server Edition, g7e (sm_120)
 # GB200/GB300 are Grace+Blackwell: the GPU die is the same sm_100/sm_103 as
 # B200/B300 (Grace is the Arm CPU, not a separate GPU arch). This matches the
 # awslabs multi-arch default and requires CUDA >= 12.8 (we build on 13.0.2).
-ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3"
-ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103"
+ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0"
+ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120"
 ARG CUDA_HOME="/usr/local/cuda"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -348,8 +350,9 @@ ARG NIXL_PREFIX="/opt/nixl"
 # enable_plugins keys are UPPERCASE (src/plugins/meson.build). A requested-but-
 # unfindable plugin ERRORS (is_explicit_enable), so a missing libfabric fails the
 # build loudly instead of silently producing a NIXL without the EFA path.
-# nixl_cuda_arch_list="90,100,103" — NIXL's meson option is a COMMA-separated
-# string (NOT semicolons, unlike TORCH_CUDA_ARCH_LIST); Hopper+Blackwell+Ultra.
+# nixl_cuda_arch_list="90,100,103,120" — NIXL's meson option is a COMMA-separated
+# string (NOT semicolons, unlike TORCH_CUDA_ARCH_LIST); Hopper+Blackwell+Ultra+RTX
+# (NIXL's own `auto` default with build_nixl_ep is the same list).
 # build_nixl_ep=true builds the EP example.
 # --buildtype=debugoptimized (-O2 -g): NIXL only compiles the test/ subdir (which
 # holds nixl_test) when buildtype != 'release' — the root meson.build gates
@@ -372,7 +375,7 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
         -Dinstall_headers=true \
         -Dbuild_tests=true \
         -Denable_plugins=UCX,LIBFABRIC,POSIX \
-        -Dnixl_cuda_arch_list="90,100,103" \
+        -Dnixl_cuda_arch_list="90,100,103,120" \
         -Dbuild_nixl_ep=true \
     && ninja -C /tmp/nixl/build \
     && ninja -C /tmp/nixl/build install \
@@ -467,8 +470,8 @@ sys.exit(0 if ok else (print('FATAL: torch or GIN NCCL changed, or vllm missing'
 # "precompiled kernels are missing". The torch/NCCL assert proves the install did not move them.
 # Installed from flashinfer-kernels.txt (exact versions + sha256, --no-deps) instead of
 # `flashinfer download-kernels`, which runs an unhashed `pip install --upgrade` WITH deps
-# against flashinfer.ai and pulls every arch (sm80/sm89/sm120f too, ~408 MB unused here).
-# Only the providers for this image's arches (sm90a/sm100a/sm103a) are listed.
+# against flashinfer.ai and pulls every arch (sm80/sm89 too, ~222 MB unused here).
+# Only the providers for this image's arches (sm90a/sm100a/sm103a/sm120f) are listed.
 RUN --mount=type=bind,source=flashinfer-kernels.txt,target=/tmp/flashinfer-kernels.txt \
     set -e; \
     TORCH_BEFORE="$(python3 -c 'from importlib.metadata import version; print(version("torch"))')"; \
@@ -672,6 +675,22 @@ print('OK nixl bindings:', s.name) if s else (print('FATAL: no nixl'), sys.exit(
 from importlib.metadata import version as v; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
 sys.exit(0 if g=='2.31.2' else (print('FATAL: NCCL', g, 'need 2.31.2') or 1))"
 
+# vllm: every arch in TORCH_CUDA_ARCH_LIST must be compiled (SASS) into the GPU code
+# this file builds itself: DeepEP V2, NIXL EP and nccl-tests. A missing arch means
+# that GPU (e.g. sm_120 on g7e) would fail at kernel launch, so fail the build here.
+ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0"
+RUN set -e; SP=/usr/local/lib/python3.12/dist-packages; \
+    for f in $(ls $SP/deep_ep/_C*.so) \
+             $(find /opt/nixl -name 'nixl_ep_cpp*.so' | head -1) \
+             /opt/nccl-tests/build/all_reduce_perf; do \
+        have=$(cuobjdump --list-elf "$f" | grep -oE 'sm_[0-9]+' | sort -u | tr '\n' ' '); \
+        for a in $(echo "${TORCH_CUDA_ARCH_LIST}" | tr ';' ' '); do \
+            sm="sm_$(echo "$a" | tr -d .)"; \
+            echo " $have " | grep -q " $sm " || { echo "FATAL: $f lacks $sm (has: $have)"; exit 1; }; \
+        done; \
+        echo "OK: $(basename "$f") has SASS for ${TORCH_CUDA_ARCH_LIST} ($have)"; \
+    done
+
 # vllm: version gate on the squashed image (metadata only; no GPU in the build).
 # Keep these defaults in step with the builder-stage ARGs of the same name.
 ARG VLLM_VERSION=0.32.1rc1.dev435+gc50aca144
@@ -680,7 +699,7 @@ RUN python3 -c "import sys; from importlib.metadata import version as v; \
 vl, t = v('vllm'), v('torch'); print('vllm', vl, '| torch', t, '|', sys.version.split()[0]); \
 sys.exit(0 if vl == '${VLLM_VERSION}' and t.startswith('${TORCH_VERSION}+') else 1)"
 
-LABEL org.opencontainers.image.description="vLLM ${VLLM_VERSION} (torch ${TORCH_VERSION}+cu130, Python 3.12) + DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300)"
+LABEL org.opencontainers.image.description="vLLM ${VLLM_VERSION} (torch ${TORCH_VERSION}+cu130, Python 3.12) + DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000)"
 LABEL nixl.ref="v1.5.0"
 ARG DEEPEP_REF=d75f22a5e07c95eb0bae94ad6445a5009c06c886
 LABEL deepep.ref="amazon-contributing/DeepEP@${DEEPEP_REF}"

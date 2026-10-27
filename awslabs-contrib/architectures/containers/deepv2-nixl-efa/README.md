@@ -239,8 +239,8 @@ The build fails if the fix is missing (`VLLM_REQUIRE_FA4_SM90_FIX=1`).
 ```bash
 cd architectures/containers/deepv2-nixl-efa
 DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
-  --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
-  --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
+  --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
+  --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
   -t <registry>/deepv2-nixl-efa:vllm-nightly-c50aca14 .
 ```
 
@@ -281,15 +281,15 @@ A rebuild of the same commit fetches the same bytes, or fails.
 | GIN NCCL, `nixl` meta-wheel | `==` + sha256 | `NCCL_WHEEL_SHA256`, `NIXL_META_SHA256` |
 | build tools | `--require-hashes` | `build-requirements.txt` |
 | vLLM dependencies | `--require-hashes` | `vllm-requirements.txt` |
-| FlashInfer kernels | `--require-hashes`, sm90a/sm100a/sm103a only | `flashinfer-kernels.txt` |
+| FlashInfer kernels | `--require-hashes`, sm90a/sm100a/sm103a/sm120f only | `flashinfer-kernels.txt` |
 
 Two build changes come with the pins. NIXL's Python bindings build with
 `--no-build-isolation` (as NIXL's own `contrib/build-wheel.sh` does), so they use
 the hashed build tools and the image's torch instead of the `torch==2.11.*` that
 NIXL's `pyproject.toml` asks the isolated env for. FlashInfer kernels install from
 `flashinfer-kernels.txt` instead of `flashinfer download-kernels`, which ran an
-unhashed `pip install --upgrade` with dependencies and added ~408 MB of kernels for
-GPUs this image does not target (sm80/sm89/sm120f). apt packages themselves are
+unhashed `pip install --upgrade` with dependencies and added ~222 MB of kernels for
+GPUs this image does not target (sm80/sm89). apt packages themselves are
 not version-pinned: the deadsnakes PPA keeps only its latest build.
 
 ### License gate (`Dockerfile.vllm`)
