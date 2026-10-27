@@ -387,14 +387,19 @@ The image matches stock vLLM nightly within 0.8% TPOT / 0.4% tok/s (run-to-run n
 pinned build matches the earlier unpinned one within 1%. It also carries NIXL over EFA, which
 stock vLLM images cannot do (they ship no libfabric). 0 failed requests in 660.
 
-Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (vLLM 0.32.0 on the same base;
-LIBFABRIC on every rank, 0 UCX, 16 EFA rails, 0 failed transfers):
+Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (`NixlConnector`, FA4, fp8
+weights; same seeds 4xxx/5xxx/6xxx in every column). On this image: LIBFABRIC on 8/8 ranks per pod,
+0 UCX, 16 EFA rails, 8 transfers x 393 MB per request, 0 failed / 0 expired transfers:
 
-| Users | TP4 prefill + TP4 decode | TP8 prefill + TP8 decode |
-|---|---|---|
-| 8 | 618 / 15.26 / 7,035 | 499 / 14.56 / 7,447 |
-| 32 | 637 / 17.75 / 23,205 | 504 / 16.58 / 25,946 |
-| 128 | 32,817 / 19.14 / 33,273 | 10,635 / 21.04 / 51,216 |
+| Users | TP8 + TP8, this image (nightly) | TP8 + TP8, vLLM 0.32.0 | TP4 + TP4, vLLM 0.32.0 |
+|---|---|---|---|
+| 8 | 429 / 6.16 / 17,040 | 499 / 14.56 / 7,447 | 618 / 15.26 / 7,035 |
+| 32 | 460 / 9.31 / 43,868 | 504 / 16.58 / 25,946 | 637 / 17.75 / 23,205 |
+| 128 | 17,142 / 13.38 / 56,809 | 10,635 / 21.04 / 51,216 | 32,817 / 19.14 / 33,273 |
+
+The nightly's FA4 fix cuts decode TPOT by 58% / 44% / 36%, so 1P1D tok/s rises 2.3x / 1.7x / 1.1x at 8 / 32 / 128 users.
+At 128 users the faster decode drains requests sooner and the single TP8 prefill becomes the
+bottleneck (TTFT 17.1 s); add prefill workers (2P1D) for that load.
 
 Gemma-4-31B is dense, so DeepEP V2 (MoE expert-parallel) is present but not exercised by these tests.
 
