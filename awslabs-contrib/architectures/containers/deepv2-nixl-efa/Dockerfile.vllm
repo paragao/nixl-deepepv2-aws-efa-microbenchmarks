@@ -164,7 +164,8 @@ RUN sed -i 's/[ #]\(.*StrictHostKeyChecking \).*/ \1no/g' /etc/ssh/ssh_config &&
 # so build steps and the runtime get 3.12 while /usr/bin/python3 (3.10) stays for apt.
 # get-pip.py comes from a fixed pypa/get-pip commit (not the moving bootstrap URL),
 # is sha256-checked, and installs an exact pip. build-requirements.txt is the hashed
-# closure of the build tools (awscli, nvidia-ml-py, ninja, meson, pybind11, tomlkit),
+# closure of the build tools (awscli, nvidia-ml-py, ninja, meson, meson-python, patchelf,
+# pybind11, tomlkit),
 # at the same versions as vllm-requirements.txt where they overlap.
 RUN --mount=type=bind,source=build-requirements.txt,target=/tmp/build-requirements.txt \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
