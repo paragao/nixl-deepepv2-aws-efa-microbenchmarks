@@ -103,6 +103,26 @@ initramfs (`dracut --force` / `update-initramfs -u`), not just drop a
 GIN needs the EFA completion-counter API (`efadv_create_comp_cntr`), first in
 EFA driver 3.3.0. Stock AMIs may ship older. Verify: `modinfo efa | grep ^version`.
 
+### 7. SSH is relaxed for in-cluster `mpirun` (both images)
+The awslabs base installs `openssh-server` / `openssh-client` so `mpirun` can
+launch ranks on peer pods, and it relaxes host checks so that launch needs no
+prompts or pre-seeded keys:
+
+| Setting | File | Effect |
+|---|---|---|
+| `StrictHostKeyChecking no` | `/etc/ssh/ssh_config` | the client accepts any peer host key |
+| `UserKnownHostsFile /dev/null` | `/etc/ssh/ssh_config` | peer host keys are never saved or compared |
+| `StrictModes no` | `/etc/ssh/sshd_config` | `sshd` does not check key-file ownership/permissions |
+
+This trades away man-in-the-middle protection for zero-setup multi-node runs.
+It is acceptable only on a private, trusted network (a single cluster's pod
+network, no public exposure). Do not expose port 22 of these pods outside the
+cluster, and do not bake private keys into the image. The image ships no keys
+and does not start `sshd` on its own: the MPI Operator `MPIJob` manifests in
+[`benchmarks/`](../../../../benchmarks/) generate the keys, mount them as a
+Kubernetes `Secret` and start `sshd` on the workers. Pods that run only
+NCCL/NIXL/vLLM without `mpirun` never start `sshd`.
+
 ---
 
 ## Dockerfile sections (template)
