@@ -413,6 +413,10 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     # image's. Without isolation they build with the hashed tools from
     # build-requirements.txt and the image's torch.
     && pip3 install --no-deps --no-build-isolation /tmp/nixl \
+    # patchelf (GPL-3.0-or-later) is a build-only tool meson-python runs to set the
+    # wheel's RPATH. The isolated build env used to discard it; remove it the same
+    # way so it never ships (the hygiene step below fails the build if it does).
+    && pip3 uninstall -y patchelf \
     && cd / && rm -rf /tmp/nixl \
     # Install the thin `nixl` meta-wheel so BOTH `import nixl` and the variant
     # `import nixl_cu13` work (source builds name the module nixl_cu13).
@@ -628,7 +632,12 @@ RUN set -e; \
              python3-apt python3-gi python3-dbus python3-keyring unattended-upgrades; do \
         if dpkg -l "$p" 2>/dev/null | grep -q '^ii'; then echo "FAIL: $p is installed"; exit 1; fi; \
     done; \
-    echo "OK: no software-properties-common / apt Python packages in the runtime layer"
+    echo "OK: no software-properties-common / apt Python packages in the runtime layer"; \
+    # 5. patchelf (GPL-3.0) is a NIXL build tool only; it must not ship.
+    if python3 -m pip show patchelf >/dev/null 2>&1; then \
+        echo "FAIL: the patchelf pip package is in the runtime layer"; exit 1; \
+    fi; \
+    echo "OK: patchelf (build-only) not in the runtime layer"
 
 # Final gate on the SQUASHED single-layer image. Assert at the BINARY level
 # (the committed .so must export the GIN symbol) AND at the import level
