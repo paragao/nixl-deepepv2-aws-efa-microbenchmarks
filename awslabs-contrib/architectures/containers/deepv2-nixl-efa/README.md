@@ -336,30 +336,39 @@ Request all 16 EFA devices per pod. In the logs expect
 
 ### Validated build
 
-Built from this branch at commit `18cebfa` (`8ef758f` before the history was
-rewritten to fix the commit author; same tree, and the image's
-`org.opencontainers.image.revision` label still reads `8ef758f`), before the input pinning and the
-deadsnakes / FlashInfer install changes above (rootless BuildKit, `--no-cache`,
-35 min), and pushed as:
+Built from this branch at commit `485c55d` (rootless BuildKit, `--no-cache`, ~60 min incl.
+push) and pushed as:
 
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm-nightly-c50aca14-fi
-@sha256:5b009bee64393c41ef0ce06de0d1cef95b5955dca05c248c60d945d1967576c8
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm-nightly-c50aca14-sm120
+@sha256:8a5867348f9066ac81879658ff95fdbc8ab83c5d5e195d322f2b590f0f523892
 ```
 
-About 11.7 GB compressed, one squashed layer, linux/amd64. Every in-build gate passed:
+About 11.5 GB compressed, one squashed layer, linux/amd64, GPU code for sm_90 / sm_100 /
+sm_103 / sm_120. Every in-build gate passed:
 
 | Gate | Result |
 |---|---|
+| pinned inputs | every `sha256sum -c`, commit-SHA assert and `--require-hashes` install OK |
 | torch-layer and squashed `libnccl.so.2` | GIN 2.31.2, exports `ncclCommQueryProperties` |
 | vLLM block | `torch 2.14.0+cu130 \| nvidia-nccl-cu13 2.31.2 \| vllm 0.32.1rc1.dev435+gc50aca144` |
 | FA4 SM90 fix | `OK: FA4 SM90 split-KV fix present` |
-| FlashInfer kernels | `flashinfer-cubin 0.7.2 \| flashinfer-jit-cache 0.7.2+cu130` |
+| FlashInfer kernels | `flashinfer-cubin 0.7.2`, jit-cache providers sm90a / sm100a / sm103a / sm120f |
+| GPU archs | DeepEP V2 `_C`, NIXL EP and nccl-tests carry SASS for sm_90 / sm_100 / sm_103 / sm_120 |
 | DeepEP V2 / NIXL | `import deep_ep` OK, LIBFABRIC plugin present, `nixl_test` present |
-| hygiene | autocommand, my-test-package, devscripts removed |
+| hygiene | autocommand, my-test-package, devscripts, patchelf and all apt Python packages absent |
+
+Prebuilt libraries already ship sm_120 SASS: torch 2.14 (`sm_75 ... sm_100, sm_120`), the GIN
+NCCL 2.31.2 wheel, nvshmem, and vLLM's own `_C` / `_moe_C` kernels. vLLM's bundled FA2/FA3
+(`vllm_flash_attn`) are sm_80 / sm_90a only; on sm_120 use `--attention-backend FLASHINFER`.
 
 GPU check on p5en.48xlarge (8x H200): torch sees 8 GPUs, vLLM uses NCCL 2.31.2, NIXL lists
-LIBFABRIC/POSIX/UCX, and the server log has no "FlashInfer's precompiled kernels are missing" line.
+LIBFABRIC/POSIX/UCX, 32 EFA endpoints, and the server log has no "FlashInfer's precompiled
+kernels are missing" line. sm_120 is checked at the binary level only: it has not yet run on a
+g7e (RTX PRO 6000) node.
+
+License gate on this image: 0 blocked, `PENDING-APPROVAL` (4 MPL-2.0 / LGPL-2.1 wheels await sign-off,
+see [License gate](#license-gate-dockerfilevllm)).
 
 ### Measured performance
 
@@ -369,13 +378,14 @@ Mean over 3 seeds of each run's p50. Every run uses a new seed, so prefix-cache 
 TP8, `--attention-backend FLASH_ATTN --attention-config '{"flash_attn_version": 4}'`, fp8 weights, bf16 KV
 (TTFT ms / TPOT ms / total tok/s):
 
-| Users | This image | Stock `vllm/vllm-openai` nightly c50aca14 | vLLM v0.25.1 | vLLM v0.32.0 |
-|---|---|---|---|---|
-| 1 | 319 / 5.38 / 2,636 | 320 / 5.37 / 2,643 | 331 / 5.35 / 2,644 | 329 / 14.39 / 1,021 |
-| 32 | 1,466 / 15.37 / 28,465 | 1,534 / 15.33 / 28,447 | 1,534 / 15.76 / 27,641 | 1,038 / 23.15 / 19,737 |
+| Users | This image (`8a586734`) | Unpinned build (`5b009bee`) | Stock `vllm/vllm-openai` nightly c50aca14 | vLLM v0.25.1 | vLLM v0.32.0 |
+|---|---|---|---|---|---|
+| 1 | 322 / 5.37 / 2,640 | 319 / 5.38 / 2,636 | 320 / 5.37 / 2,643 | 331 / 5.35 / 2,644 | 329 / 14.39 / 1,021 |
+| 32 | 1,459 / 15.45 / 28,355 | 1,466 / 15.37 / 28,465 | 1,534 / 15.33 / 28,447 | 1,534 / 15.76 / 27,641 | 1,038 / 23.15 / 19,737 |
 
-The image matches stock vLLM nightly within 0.4% and carries NIXL over EFA, which stock vLLM images
-cannot do (they ship no libfabric).
+The image matches stock vLLM nightly within 0.8% TPOT / 0.4% tok/s (run-to-run noise), and the
+pinned build matches the earlier unpinned one within 1%. It also carries NIXL over EFA, which
+stock vLLM images cannot do (they ship no libfabric). 0 failed requests in 660.
 
 Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (vLLM 0.32.0 on the same base;
 LIBFABRIC on every rank, 0 UCX, 16 EFA rails, 0 failed transfers):
