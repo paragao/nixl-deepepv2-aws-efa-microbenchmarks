@@ -336,7 +336,7 @@ Request all 16 EFA devices per pod. In the logs expect
 
 ### Validated build
 
-Built from this branch at commit `2761b8c` (`8ef758f` before the history was
+Built from this branch at commit `18cebfa` (`8ef758f` before the history was
 rewritten to fix the commit author; same tree, and the image's
 `org.opencontainers.image.revision` label still reads `8ef758f`), before the input pinning and the
 deadsnakes / FlashInfer install changes above (rootless BuildKit, `--no-cache`,
