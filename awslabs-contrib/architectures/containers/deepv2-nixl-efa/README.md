@@ -401,6 +401,20 @@ The nightly's FA4 fix cuts decode TPOT by 58% / 44% / 36%, so 1P1D tok/s rises 2
 At 128 users the faster decode drains requests sooner and the single TP8 prefill becomes the
 bottleneck (TTFT 17.1 s); add prefill workers (2P1D) for that load.
 
+2P1D on this image: two TP8 prefill workers + one TP8 decode worker on three p5en nodes, the
+proxy round-robins prefills (50/50 split measured), same seeds. LIBFABRIC on 8/8 ranks in all
+three pods, 0 UCX, 16 EFA rails, 0 failed / 0 expired transfers, 0 failed requests in 1,812:
+
+| Users | 1P1D TP8 + TP8 (16 GPUs) | 2P1D TP8 x2 + TP8 (24 GPUs) |
+|---|---|---|
+| 8 | 429 / 6.16 / 17,040 | 436 / 6.15 / 16,446 |
+| 32 | 460 / 9.31 / 43,868 | 452 / 9.30 / 46,408 |
+| 128 | 17,142 / 13.38 / 56,809 | 597 / 23.11 / 70,784 |
+
+At 128 users 2P1D cuts TTFT 29x (17.1 s -> 0.6 s) and lifts tok/s 25%. The single decode worker
+is now the bottleneck: TPOT rises 13.4 -> 23.1 ms, and tok/s per GPU drops 3,551 -> 2,949.
+At 8-32 users 2P1D gives no gain over 1P1D.
+
 Gemma-4-31B is dense, so DeepEP V2 (MoE expert-parallel) is present but not exercised by these tests.
 
 ---
