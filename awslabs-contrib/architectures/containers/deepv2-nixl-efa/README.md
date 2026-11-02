@@ -199,6 +199,32 @@ determine the image.
 | `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | GPU arch (Hopper+Blackwell+GB+RTX/g7e) |
 | `NVCC_GENCODE` | `...compute_90,sm_90 ...compute_100,sm_100 ...compute_103,sm_103 ...compute_120,sm_120` | codegen |
 
+### Validated build (`Dockerfile`)
+
+Built from this branch at commit `020e077` (rootless BuildKit, `--no-cache`, 30 min, no build-args,
+so the Dockerfile defaults above were used) and pushed as:
+
+```
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.50.0-sm120
+@sha256:091ce165ab2413c43b3096e0a9651dd151d7853be6a5141dae4f3795760acf1d
+```
+
+About 10.2 GiB compressed, one squashed layer, linux/amd64. Every in-build gate passed: GIN NCCL
+2.31.2 (torch layer, re-pin layer and squashed image), DeepEP V2 installed, nccl-tests built,
+LIBFABRIC plugin present, `nixl_test` preserved, hygiene, and the squashed-image import gate.
+
+GPU code per binary (`cuobjdump --list-elf`, verified in a fresh pod pulled by digest):
+
+| Binary | sm_90 | sm_100 | sm_103 | sm_120 |
+|---|---|---|---|---|
+| DeepEP V2 `deep_ep/_C*.so` | yes | yes | yes | yes |
+| nccl-tests `all_reduce_perf`, `all_gather_perf`, `alltoall_perf` | yes | yes | yes | yes |
+| NIXL EP `nixl_ep_cu13/nixl_ep_cpp_torch211*.so` | yes | yes | yes | yes |
+
+NIXL's core libraries and its UCX / LIBFABRIC / POSIX plugins carry no device code.
+`import deep_ep, nixl` works. sm_120 is checked at the binary level only: it has not yet run on a
+g7e (RTX PRO 6000) node.
+
 ---
 
 ## vLLM image (`Dockerfile.vllm`)
