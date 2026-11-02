@@ -42,7 +42,7 @@ stack and the same in-build gates. See [vLLM image](#vllm-image-dockerfilevllm) 
 | PyTorch | 2.11.0 (`cu130`) | |
 | nccl-tests | `master` | `all_reduce_perf`, `all_gather_perf`, `alltoall_perf` on `PATH` |
 | nixl_test | from NIXL `test/nixl_test.cpp` | at `/opt/nixl-tests/nixl_test` |
-| GPU arch | sm_90;sm_100;sm_103 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300) | override `TORCH_CUDA_ARCH_LIST` / `NVCC_GENCODE` to trim to one arch |
+| GPU arch | sm_90;sm_100;sm_103;sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e) | override `TORCH_CUDA_ARCH_LIST` / `NVCC_GENCODE` to trim to one arch |
 
 ---
 
@@ -153,19 +153,21 @@ Integration contracts worth copying verbatim:
 
 ### Build
 
-Multi-arch default — Hopper (H100/H200) + Blackwell (B200/B300) + Grace-Blackwell (GB200/GB300):
+Multi-arch default — Hopper (H100/H200) + Blackwell (B200/B300) + Grace-Blackwell (GB200/GB300)
++ RTX PRO 6000 Blackwell (g7e.48xlarge):
 
 ```bash
 cd architectures/containers/deepv2-nixl-efa
 DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
-  --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
-  --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
+  --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
+  --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
   -t <registry>/deepv2-nixl-efa:nixl1.5.0-deepepv2-efa1.50.0 .
 ```
 
 Compute-capability map: `9.0`=Hopper (sm_90), `10.0`=Blackwell DC (sm_100, incl.
-GB200), `10.3`=Blackwell Ultra (sm_103, B300/GB300 steppings). GB200/GB300 are
-Grace+Blackwell — the GPU die is the same sm_100/sm_103, Grace is the Arm CPU.
+GB200), `10.3`=Blackwell Ultra (sm_103, B300/GB300 steppings), `12.0`=Blackwell RTX
+(sm_120, RTX PRO 6000 on g7e). GB200/GB300 are Grace+Blackwell — the GPU die is the
+same sm_100/sm_103, Grace is the Arm CPU. sm_120 is a separate die, not sm_100-compatible.
 Requires CUDA ≥ 12.8 (built on 13.0.2).
 
 To trim to a single arch (smaller image, faster build), e.g. Hopper-only:
@@ -194,8 +196,8 @@ determine the image.
 | `UCX_VERSION` | `v1.23.x` | NIXL UCX backend |
 | `TORCH_VERSION` | `2.11.0` | PyTorch |
 | `NCCL_TESTS_REF` | `master` | nccl-tests |
-| `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3` | GPU arch (Hopper+Blackwell+GB) |
-| `NVCC_GENCODE` | `...compute_90,sm_90 ...compute_100,sm_100 ...compute_103,sm_103` | codegen |
+| `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | GPU arch (Hopper+Blackwell+GB+RTX/g7e) |
+| `NVCC_GENCODE` | `...compute_90,sm_90 ...compute_100,sm_100 ...compute_103,sm_103 ...compute_120,sm_120` | codegen |
 
 ---
 

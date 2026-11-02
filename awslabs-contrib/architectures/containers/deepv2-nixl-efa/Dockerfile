@@ -16,10 +16,11 @@
 #   - DeepEP V2  -> NCCL GIN (EFA-GDA, type 5) via aws-ofi-nccl
 #   - NIXL 1.5.0 -> LIBFABRIC plugin over the same libfabric/EFA stack
 #
-# Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300):
+# Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300
+#        + RTX PRO 6000 Blackwell on g7e):
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
-#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3" \
-#     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
+#     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
+#     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
 #     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0 .
 
 ARG CUDA_VERSION=13.0.2
@@ -41,11 +42,14 @@ ARG UCX_VERSION="v1.23.x"
 #   9.0  = Hopper          -> H100 / H200          (sm_90)
 #   10.0 = Blackwell DC    -> B200 / B300, GB200   (sm_100)
 #   10.3 = Blackwell Ultra -> B300 / GB300 steppings (sm_103)
+#   12.0 = Blackwell RTX   -> RTX PRO 6000 Blackwell Server Edition, g7e (sm_120)
 # GB200/GB300 are Grace+Blackwell: the GPU die is the same sm_100/sm_103 as
-# B200/B300 (Grace is the Arm CPU, not a separate GPU arch). This matches the
-# awslabs multi-arch default and requires CUDA >= 12.8 (we build on 13.0.2).
-ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3"
-ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103"
+# B200/B300 (Grace is the Arm CPU, not a separate GPU arch). sm_120 is a
+# different Blackwell die, not compatible with sm_100.
+# 9.0/10.0/10.3 match the awslabs multi-arch default; 12.0 is added for g7e
+# (same arch list as Dockerfile.vllm). Requires CUDA >= 12.8 (we build on 13.0.2).
+ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0"
+ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120"
 ARG CUDA_HOME="/usr/local/cuda"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -255,8 +259,8 @@ ARG NIXL_PREFIX="/opt/nixl"
 # enable_plugins keys are UPPERCASE (src/plugins/meson.build). A requested-but-
 # unfindable plugin ERRORS (is_explicit_enable), so a missing libfabric fails the
 # build loudly instead of silently producing a NIXL without the EFA path.
-# nixl_cuda_arch_list="90,100,103" — NIXL's meson option is a COMMA-separated
-# string (NOT semicolons, unlike TORCH_CUDA_ARCH_LIST); Hopper+Blackwell+Ultra.
+# nixl_cuda_arch_list="90,100,103,120" — NIXL's meson option is a COMMA-separated
+# string (NOT semicolons, unlike TORCH_CUDA_ARCH_LIST); Hopper+Blackwell+Ultra+RTX (g7e).
 # build_nixl_ep=true builds the EP example.
 # --buildtype=debugoptimized (-O2 -g): NIXL only compiles the test/ subdir (which
 # holds nixl_test) when buildtype != 'release' — the root meson.build gates
@@ -277,7 +281,7 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
         -Dinstall_headers=true \
         -Dbuild_tests=true \
         -Denable_plugins=UCX,LIBFABRIC,POSIX \
-        -Dnixl_cuda_arch_list="90,100,103" \
+        -Dnixl_cuda_arch_list="90,100,103,120" \
         -Dbuild_nixl_ep=true \
     && ninja -C /tmp/nixl/build \
     && ninja -C /tmp/nixl/build install \
@@ -495,7 +499,7 @@ print('OK nixl bindings:', s.name) if s else (print('FATAL: no nixl'), sys.exit(
 from importlib.metadata import version as v; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
 sys.exit(0 if g=='2.31.2' else (print('FATAL: NCCL', g, 'need 2.31.2') or 1))"
 
-LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300)"
+LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e)"
 LABEL nixl.ref="v1.5.0"
 LABEL deepep.ref="amazon-contributing/DeepEP@main"
 LABEL efa.installer="1.50.0"
