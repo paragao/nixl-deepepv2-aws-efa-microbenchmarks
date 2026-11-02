@@ -25,6 +25,10 @@ for p in d.get("artifacts", []):
         for x in lics:
             if x and x not in uniq:
                 uniq.append(x)
+        # Parenthesise compound findings before joining, so "A OR B" + "C" becomes
+        # "(A OR B) AND C", not "A OR B AND C" (which SPDX reads as A OR (B AND C)).
+        if len(uniq) > 1:
+            uniq = ["(%s)" % x if (" OR " in x or " AND " in x) else x for x in uniq]
         lic = " AND ".join(uniq) if uniq else "NOASSERTION"
     # free-text copyright files syft couldn't classify come through as
     # "sha256:<hash>" -- mark them unknown so the gate treats them as such
