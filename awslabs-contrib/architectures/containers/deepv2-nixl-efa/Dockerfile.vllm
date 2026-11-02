@@ -35,8 +35,8 @@
 #     lock (vllm-requirements.txt) that omits torch, nvidia-nccl-cu13 and vllm, so pip
 #     cannot replace the torch layer or the GIN NCCL. The NCCL GIN, squash, hygiene and
 #     import gates still run after it, unchanged.
-#   - Default vLLM: nightly c50aca14 (0.32.1rc1.dev435). It contains the FA4 SM90 split-KV
-#     fix (vllm-project/flash-attention#198). vLLM v0.32.0 does NOT, and decodes up to
+#   - Default vLLM: v0.33.0 from PyPI (same commit as v0.33.0rc3). It contains the FA4 SM90
+#     split-KV fix (vllm-project/flash-attention#198). vLLM v0.32.0 does NOT, and decodes up to
 #     2.7x slower on H100/H200 with the FA4 backend. To pin another wheel, change
 #     VLLM_WHEEL_URL, VLLM_VERSION and TORCH_VERSION together and regenerate
 #     vllm-requirements.txt (command in its header).
@@ -45,7 +45,7 @@
 #   build-requirements.txt, flashinfer-kernels.txt, deadsnakes.asc
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
 #     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
-#     -t <registry>/<repo>/nixl-deepep-efa:vllm-nightly-c50aca14 .
+#     -t <registry>/<repo>/nixl-deepep-efa:vllm0.33.0 .
 
 #
 # Pinning: every input is pinned to exact bytes so a rebuild of this file gives the
@@ -436,9 +436,11 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
 # So vLLM and its pinned dependency closure go in with --no-deps. The lock omits torch,
 # nvidia-nccl-cu13 and vllm (see its header); the assert proves torch and NCCL did not
 # move, and a source check proves the FA4 SM90 split-KV fix is present.
-ARG VLLM_VERSION=0.32.1rc1.dev435+gc50aca144
-ARG VLLM_WHEEL_URL=https://wheels.vllm.ai/c50aca14416ef29f6ed0ed256302f30646726dcd/vllm-0.32.1rc1.dev435%2Bgc50aca144-cp38-abi3-manylinux_2_28_x86_64.whl
-ARG VLLM_WHEEL_SHA256=d999df484e63f00027883c0545685c8468198180de7fe598efb657a8f8a87cf1
+# vLLM v0.33.0 (PyPI). Same commit as the v0.33.0rc3 tag (4ba787ec); pins torch 2.14.0
+# and flash-attention b273a02621 (has the FA4 SM90 split-KV fix).
+ARG VLLM_VERSION=0.33.0
+ARG VLLM_WHEEL_URL=https://files.pythonhosted.org/packages/8b/a8/92e278093df40fde4c4bfd6572704bb8f398d6a2280d8c82cb5efaf12047/vllm-0.33.0-cp38-abi3-manylinux_2_28_x86_64.whl
+ARG VLLM_WHEEL_SHA256=4b6bdec4ab269990bf70d45a3c1e94c3760a27064513760193b26d6f0da883aa
 # Set to 0 only if you pin a vLLM wheel older than the fix on purpose (e.g. v0.32.0).
 ARG VLLM_REQUIRE_FA4_SM90_FIX=1
 RUN --mount=type=bind,source=vllm-requirements.txt,target=/tmp/vllm-requirements.txt \
@@ -693,7 +695,7 @@ RUN set -e; SP=/usr/local/lib/python3.12/dist-packages; \
 
 # vllm: version gate on the squashed image (metadata only; no GPU in the build).
 # Keep these defaults in step with the builder-stage ARGs of the same name.
-ARG VLLM_VERSION=0.32.1rc1.dev435+gc50aca144
+ARG VLLM_VERSION=0.33.0
 ARG TORCH_VERSION=2.14.0
 RUN python3 -c "import sys; from importlib.metadata import version as v; \
 vl, t = v('vllm'), v('torch'); print('vllm', vl, '| torch', t, '|', sys.version.split()[0]); \
