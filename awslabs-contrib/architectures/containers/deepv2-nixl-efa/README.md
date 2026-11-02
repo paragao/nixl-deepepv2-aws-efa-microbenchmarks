@@ -239,7 +239,7 @@ import checks) and adds its own.
 |---|---|---|---|
 | Python | 3.10 (jammy) | 3.12 (deadsnakes PPA) | vLLM wheels need Python >= 3.11. `/usr/bin/python3` stays 3.10 for apt; `python3` on `PATH` is 3.12. The PPA is added by hand with a vendored key ([`deadsnakes.asc`](./deadsnakes.asc)), not `add-apt-repository`, so no `software-properties-common` apt Python packages ship |
 | PyTorch | 2.11.0 | 2.14.0 | the exact torch the pinned vLLM wheel requires |
-| vLLM | – | nightly `c50aca14` (0.32.1rc1.dev435) | contains the FA4 SM90 split-KV fix |
+| vLLM | – | v0.33.0 from PyPI (same commit as v0.33.0rc3) | contains the FA4 SM90 split-KV fix |
 | Lock file | – | [`vllm-requirements.txt`](./vllm-requirements.txt) | vLLM's full dependency closure, installed with `pip --no-deps --require-hashes` |
 | Pinning | refs and tags | every input pinned to exact bytes | see [Pinned inputs](#pinned-inputs-dockerfilevllm) |
 
@@ -248,17 +248,18 @@ would silently replace the GIN NCCL 2.31.2 that DeepEP V2 is built against. So
 the image installs the pinned lock with `--no-deps` (torch, NCCL and vLLM are left
 out of it) and then asserts torch and NCCL did not move.
 
-### Why the nightly and not v0.32.0
+### Why v0.33.0 and not v0.32.0
 
 vLLM v0.32.0 ships FA4 code from just before
 [flash-attention#198](https://github.com/vllm-project/flash-attention/pull/198).
 On SM90 (H100/H200) its split-KV decode kernel makes one split do all the work.
+v0.32.1rc0 and later (including v0.33.0) pin flash-attention `b273a02621`, which has the fix.
 Measured on Gemma-4-31B-IT, 8x H200, ISL 14000 / OSL 1000:
 
-| TPOT p50, 1 user | v0.25.1 | v0.32.0 | nightly c50aca14 |
-|---|---|---|---|
-| TP8, FA4 | 5.35 ms | 14.39 ms | 5.37 ms |
-| TP4 DP2, FA4 | 6.18 ms | 14.85 ms | 6.18 ms |
+| TPOT p50, 1 user | v0.25.1 | v0.32.0 | nightly c50aca14 | v0.33.0 (this image) |
+|---|---|---|---|---|
+| TP8, FA4 | 5.35 ms | 14.39 ms | 5.37 ms | 5.38 ms |
+| TP4 DP2, FA4 | 6.18 ms | 14.85 ms | 6.18 ms | – |
 
 The build fails if the fix is missing (`VLLM_REQUIRE_FA4_SM90_FIX=1`).
 
@@ -269,7 +270,7 @@ cd architectures/containers/deepv2-nixl-efa
 DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile.vllm \
   --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
   --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
-  -t <registry>/deepv2-nixl-efa:vllm-nightly-c50aca14 .
+  -t <registry>/deepv2-nixl-efa:vllm0.33.0 .
 ```
 
 Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh`, `vllm-requirements.txt`,
@@ -281,9 +282,9 @@ Build context needs `Dockerfile.vllm`, `setup_deepep_gin.sh`, `vllm-requirements
 |---|---|---|
 | `PYTHON_VERSION` | `3.12` | interpreter vLLM runs on |
 | `TORCH_VERSION` | `2.14.0` | must equal the vLLM wheel's `torch==` pin |
-| `VLLM_WHEEL_URL` | nightly `c50aca14` x86_64 wheel on `wheels.vllm.ai` | the vLLM wheel |
-| `VLLM_WHEEL_SHA256` | `d999df48…` | wheel integrity check |
-| `VLLM_VERSION` | `0.32.1rc1.dev435+gc50aca144` | asserted after install |
+| `VLLM_WHEEL_URL` | v0.33.0 x86_64 wheel on PyPI (`files.pythonhosted.org`) | the vLLM wheel |
+| `VLLM_WHEEL_SHA256` | `4b6bdec4…` | wheel integrity check |
+| `VLLM_VERSION` | `0.33.0` | asserted after install |
 | `VLLM_REQUIRE_FA4_SM90_FIX` | `1` | fail the build if the FA4 SM90 fix is absent |
 
 To pin a different vLLM: change `VLLM_WHEEL_URL`, `VLLM_WHEEL_SHA256`,
@@ -364,24 +365,28 @@ Request all 16 EFA devices per pod. In the logs expect
 
 ### Validated build
 
-Built from this branch at commit `485c55d` (rootless BuildKit, `--no-cache`, ~60 min incl.
-push) and pushed as:
+Built from this branch at commit `12a6ae6` (vLLM v0.33.0; rootless BuildKit, `--no-cache`,
+default build-args) and pushed as:
 
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm-nightly-c50aca14-sm120
-@sha256:8a5867348f9066ac81879658ff95fdbc8ab83c5d5e195d322f2b590f0f523892
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm0.33.0-sm120
+@sha256:eeaa6801eeea1b24e9f0c42ada6be02e499c8707d092a82d94e1519893aa2662
 ```
 
-About 11.5 GB compressed, one squashed layer, linux/amd64, GPU code for sm_90 / sm_100 /
-sm_103 / sm_120. Every in-build gate passed:
+About 10.8 GiB compressed, one squashed layer, linux/amd64, GPU code for sm_90 / sm_100 /
+sm_103 / sm_120. The previous validated build (vLLM nightly c50aca14, commit `485c55d`) was
+`vllm-nightly-c50aca14-sm120@sha256:8a5867348f9066ac81879658ff95fdbc8ab83c5d5e195d322f2b590f0f523892`.
+
+Every pipeline stage passed (build, arch audit, SBOM + license gate, vLLM smoke, 2-node
+validation gate). Every in-build gate passed:
 
 | Gate | Result |
 |---|---|
 | pinned inputs | every `sha256sum -c`, commit-SHA assert and `--require-hashes` install OK |
 | torch-layer and squashed `libnccl.so.2` | GIN 2.31.2, exports `ncclCommQueryProperties` |
-| vLLM block | `torch 2.14.0+cu130 \| nvidia-nccl-cu13 2.31.2 \| vllm 0.32.1rc1.dev435+gc50aca144` |
+| vLLM block | `torch 2.14.0+cu130 \| nvidia-nccl-cu13 2.31.2 \| vllm 0.33.0` |
 | FA4 SM90 fix | `OK: FA4 SM90 split-KV fix present` |
-| FlashInfer kernels | `flashinfer-cubin 0.7.2`, jit-cache providers sm90a / sm100a / sm103a / sm120f |
+| FlashInfer kernels | `flashinfer-cubin 0.7.2.post1`, jit-cache providers sm90a / sm100a / sm103a / sm120f |
 | GPU archs | DeepEP V2 `_C`, NIXL EP and nccl-tests carry SASS for sm_90 / sm_100 / sm_103 / sm_120 |
 | DeepEP V2 / NIXL | `import deep_ep` OK, LIBFABRIC plugin present, `nixl_test` present |
 | hygiene | autocommand, my-test-package, devscripts, patchelf and all apt Python packages absent |
@@ -395,8 +400,31 @@ LIBFABRIC/POSIX/UCX, 32 EFA endpoints, and the server log has no "FlashInfer's p
 kernels are missing" line. sm_120 is checked at the binary level only: it has not yet run on a
 g7e (RTX PRO 6000) node.
 
-License gate on this image: 0 blocked, `PENDING-APPROVAL` (4 MPL-2.0 / LGPL-2.1 wheels await sign-off,
-see [License gate](#license-gate-dockerfilevllm)).
+License gate on this image: 0 blocked, `PENDING-APPROVAL` (the same 4 MPL-2.0 / LGPL-2.1 wheels await
+sign-off, see [License gate](#license-gate-dockerfilevllm)). vs the nightly build: 1 new package
+(`flashinfer-jit-cache-sm120f`, Apache-2.0), 37 version bumps, no licence changes.
+
+vLLM smoke (TP8 FA4, unique seeds, exact request counts, 0 prefix-cache hits), TPOT ms / tok/s:
+
+| Users | v0.33.0 (`eeaa6801`) | nightly build (`8a586734`) | stock vLLM nightly c50aca14 |
+|---|---|---|---|
+| 1 | 5.38 / 2,634 | 5.37 / 2,640 | 5.37 / 2,643 |
+| 32 | 15.02 / 28,468 | 15.02 / 28,355 | 14.93 / 28,448 |
+
+Validation gate ([`validation-gate.yaml`](./validation-gate.yaml), 2 p5en nodes, 16 ranks, mean of 3 runs):
+
+| Metric | Baseline | Floor | Mean | Result |
+|---|---|---|---|---|
+| NCCL all_reduce busbw @8G | 476.5 | 462.2 | 477.7 | PASS |
+| NCCL all_gather busbw @8G | 352.9 | 342.3 | 349.0 | PASS |
+| NCCL all_to_all busbw @8G | 83.5 | 81.0 | 83.5 | PASS |
+| DeepEP V2 dispatch bus BW | 267.0 | 259.0 | 264.9 | PASS |
+| DeepEP V2 combine bus BW | 187.0 | 177.6 | 193.0 | PASS |
+| NIXL LIBFABRIC GPU-to-GPU, 1 GiB | – | 3/3 pass | 47.0 GB/s | PASS |
+
+NIXL used only the LIBFABRIC backend; EFA `rdma_read_bytes` rose by exactly the bytes moved.
+DeepEP needed `privileged: true` on the workers, because `NVIDIA_GDRCOPY=enabled` did not
+expose `/dev/gdrdrv` in the pod on this cluster.
 
 ### Measured performance
 
@@ -406,7 +434,7 @@ Mean over 3 seeds of each run's p50. Every run uses a new seed, so prefix-cache 
 TP8, `--attention-backend FLASH_ATTN --attention-config '{"flash_attn_version": 4}'`, fp8 weights, bf16 KV
 (TTFT ms / TPOT ms / total tok/s):
 
-| Users | This image (`8a586734`) | Unpinned build (`5b009bee`) | Stock `vllm/vllm-openai` nightly c50aca14 | vLLM v0.25.1 | vLLM v0.32.0 |
+| Users | Nightly build (`8a586734`) | Unpinned build (`5b009bee`) | Stock `vllm/vllm-openai` nightly c50aca14 | vLLM v0.25.1 | vLLM v0.32.0 |
 |---|---|---|---|---|---|
 | 1 | 322 / 5.37 / 2,640 | 319 / 5.38 / 2,636 | 320 / 5.37 / 2,643 | 331 / 5.35 / 2,644 | 329 / 14.39 / 1,021 |
 | 32 | 1,459 / 15.45 / 28,355 | 1,466 / 15.37 / 28,465 | 1,534 / 15.33 / 28,447 | 1,534 / 15.76 / 27,641 | 1,038 / 23.15 / 19,737 |
@@ -419,7 +447,7 @@ Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (`NixlConnecto
 weights; same seeds 4xxx/5xxx/6xxx in every column). On this image: LIBFABRIC on 8/8 ranks per pod,
 0 UCX, 16 EFA rails, 8 transfers x 393 MB per request, 0 failed / 0 expired transfers:
 
-| Users | TP8 + TP8, this image (nightly) | TP8 + TP8, vLLM 0.32.0 | TP4 + TP4, vLLM 0.32.0 |
+| Users | TP8 + TP8, nightly build (`8a586734`) | TP8 + TP8, vLLM 0.32.0 | TP4 + TP4, vLLM 0.32.0 |
 |---|---|---|---|
 | 8 | 429 / 6.16 / 17,040 | 499 / 14.56 / 7,447 | 618 / 15.26 / 7,035 |
 | 32 | 460 / 9.31 / 43,868 | 504 / 16.58 / 25,946 | 637 / 17.75 / 23,205 |
