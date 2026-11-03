@@ -1,0 +1,39 @@
+# NIXL LIBFABRIC (EFA) gate, target side. Runs on ${NODE_1}; serves a 1 GiB GPU buffer over
+# ONLY the LIBFABRIC backend. Apply this first, then nixl-lf-initiator-validate.yaml.
+# Scripts come from a ConfigMap:
+#   kubectl -n ${K8S_NAMESPACE} create configmap nixl-lf-scripts \
+#     --from-file=benchmarks/nixl/nixl-lf-run.sh --from-file=benchmarks/nixl/nixl_lf_test.py
+#   envsubst < benchmarks/nixl/nixl-lf-target-validate.yaml | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nixl-lf-target
+  namespace: ${K8S_NAMESPACE}
+  labels: {app: nixl-lf-test, role: target}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: "${NODE_1}"}
+  tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+  containers:
+  - name: target
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}@${IMAGE_DIGEST}
+    imagePullPolicy: Always
+    env:
+    - {name: NVIDIA_GDRCOPY, value: "enabled"}
+    - {name: NIXL_ITERS, value: "1 2 3"}
+    command: ["/bin/bash", "-c"]
+    args: ["bash /scripts/nixl-lf-run.sh target $(hostname -i | awk '{print $1}')"]
+    # privileged: exposes /dev/gdrdrv (GPU memory registration over EFA) and lets
+    # `rdma statistic` read the EFA counters.
+    securityContext: {privileged: true, capabilities: {add: ["SYS_ADMIN", "IPC_LOCK"]}}
+    volumeMounts:
+    - {name: shmem, mountPath: /dev/shm}
+    - {name: scripts, mountPath: /scripts}
+    resources:
+      limits: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16}
+      requests: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, cpu: "16", memory: 64Gi}
+  volumes:
+  - name: shmem
+    emptyDir: {medium: Memory, sizeLimit: 32Gi}
+  - name: scripts
+    configMap: {name: nixl-lf-scripts}

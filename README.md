@@ -116,18 +116,26 @@ envsubst < benchmarks/nccl/nccl-tests-validate.yaml | kubectl apply -f -
 # 2. DeepEP V2 — expert-parallel dispatch/combine over NCCL GIN / EFA-GDA
 envsubst < benchmarks/deepep/deepep-validate.yaml | kubectl apply -f -
 
-# 3. NIXL — point-to-point transfer over the LIBFABRIC/EFA backend
-envsubst < benchmarks/nixl/nixl-test-target-validate.yaml    | kubectl apply -f -   # target first
-envsubst < benchmarks/nixl/nixl-test-initiator-validate.yaml | kubectl apply -f -   # then initiator
+# 3. NIXL — point-to-point GPU transfer over ONLY the LIBFABRIC/EFA backend
+kubectl -n ${K8S_NAMESPACE} create configmap nixl-lf-scripts \
+  --from-file=benchmarks/nixl/nixl-lf-run.sh --from-file=benchmarks/nixl/nixl_lf_test.py
+envsubst < benchmarks/nixl/nixl-lf-target-validate.yaml | kubectl apply -f -      # target first (NODE_1)
+kubectl -n ${K8S_NAMESPACE} wait --for=condition=Ready pod/nixl-lf-target --timeout=15m
+export NIXL_TARGET_IP=$(kubectl -n ${K8S_NAMESPACE} get pod nixl-lf-target -o jsonpath='{.status.podIP}')
+envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f -   # then initiator (NODE_0)
 ```
+
+`benchmarks/nixl/nixl-test-*-validate.yaml` run NIXL's own `nixl_test` (`test/nixl_test.cpp`).
+It hard-codes `createBackend("UCX")`, so it only proves the UCX path, not LIBFABRIC over EFA.
+Keep it as a UCX smoke test; the gate counts the `nixl-lf-*` test above.
 
 ### Success markers (what a pass looks like)
 
 | Suite | Pass condition |
 |---|---|
 | NCCL | every rank logs `NET/OFI Selected provider is efa … (found 16 nics)`; busbw reported; exit 0 |
-| DeepEP V2 | `Loaded gin plugin Libfabric_GDAKI`; no `host_register_iomem failed`; dispatch + combine complete on all 16 ranks |
-| NIXL | LIBFABRIC backend selected; `Transfer completed and Buffers match`; exit 0 on both pods |
+| DeepEP V2 | `Loaded gin plugin Libfabric_GDAKI`; no `host_register_iomem failed`; no `Failed to open gdr handle` (the workers run `privileged: true` so `/dev/gdrdrv` is in the pod); dispatch + combine complete on all 16 ranks |
+| NIXL | `NIXL backends created: ['LIBFABRIC']` and `LIBFABRIC backend selected`; `verify=OK` on every transfer; `NIXL_LF_RESULT PASS`; `NIXL_LF_RUN_DONE ... rc=0` on both pods; EFA `rdma_read_bytes` (in the `EFA_COUNTERS` lines) rises by 5 GiB per iteration |
 
 Throughput floors for sign-off live in `validation-gate.yaml`; the gate compares
 a 3-run mean against each floor and blocks a regression.
