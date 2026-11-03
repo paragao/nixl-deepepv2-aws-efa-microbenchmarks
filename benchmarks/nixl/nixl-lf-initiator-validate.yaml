@@ -3,8 +3,10 @@
 # Apply the target (nixl-lf-target-validate.yaml) first, then set NIXL_TARGET_IP to its pod IP:
 #   export NIXL_TARGET_IP=$(kubectl -n ${K8S_NAMESPACE} get pod nixl-lf-target -o jsonpath='{.status.podIP}')
 #   envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f -
-# Pass: every iteration prints "LIBFABRIC backend selected", "verify=OK" x5 and
+# Pass (defaults): every iteration prints "LIBFABRIC backend selected", "verify=OK" x5 and
 # "NIXL_LF_RESULT PASS", rc=0, and EFA rdma_read_bytes rises by 5 GiB per iteration.
+# With N GPUs, each GPU prints its own lines ([gpuN] prefix) and NIXL_LF_AGG gives the total GB/s;
+# with NIXL_OP=WRITE, EFA rdma_write_bytes rises on this node instead.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -22,6 +24,12 @@ spec:
     env:
     - {name: NVIDIA_GDRCOPY, value: "enabled"}
     - {name: NIXL_ITERS, value: "1 2 3"}
+    # Optional knobs (see nixl-lf-run.sh); empty = default. Export before envsubst, e.g.
+    #   NIXL_GPUS="0 1 2 3 4 5 6 7" (all 16 EFA NICs)  NIXL_OP=WRITE  NIXL_TEST_ARGS="--iters 20"
+    # NIXL_GPUS and NIXL_TEST_ARGS must match on both pods.
+    - {name: NIXL_GPUS, value: "${NIXL_GPUS}"}
+    - {name: NIXL_OP, value: "${NIXL_OP}"}
+    - {name: NIXL_TEST_ARGS, value: "${NIXL_TEST_ARGS}"}
     command: ["/bin/bash", "-c"]
     args: ["bash /scripts/nixl-lf-run.sh initiator ${NIXL_TARGET_IP}"]
     # privileged: exposes /dev/gdrdrv (GPU memory registration over EFA) and lets

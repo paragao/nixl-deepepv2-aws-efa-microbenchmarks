@@ -129,13 +129,49 @@ envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f - 
 It hard-codes `createBackend("UCX")`, so it only proves the UCX path, not LIBFABRIC over EFA.
 Keep it as a UCX smoke test; the gate counts the `nixl-lf-*` test above.
 
+#### NIXL test knobs (network load)
+
+Export these before the two `envsubst` lines. Empty means the default. `NIXL_GPUS` and
+`NIXL_TEST_ARGS` must be the same on both pods.
+
+| Env | Default | What it changes |
+|---|---|---|
+| `NIXL_GPUS` | `0` | GPUs driven at once, one process each. One p5en GPU uses its 2 nearest EFA NICs; `"0 1 2 3 4 5 6 7"` uses all 16 |
+| `NIXL_OP` | `READ` | `READ` (initiator pulls) or `WRITE` (initiator pushes; the target verifies) |
+| `NIXL_TEST_ARGS` | empty | extra `nixl_lf_test.py` args: `--rows` (default 64), `--row-mib` (16; 64 x 16 MiB = 1 GiB per transfer), `--iters` (5 transfers per run) |
+| `NIXL_ITERS` | `1 2 3` | runs per pod (set in the manifests) |
+
+All initiator processes start their first transfer at one shared time (`--start-at`), so
+`NIXL_LF_AGG ... agg_GBps` is the real combined bandwidth. `sum_mean_GBps` adds each GPU's
+per-transfer mean. Example, all 8 GPUs, WRITE, 20 transfers each:
+
+```bash
+export NIXL_GPUS="0 1 2 3 4 5 6 7" NIXL_OP=WRITE NIXL_TEST_ARGS="--iters 20"
+```
+
+Measured on 2 x p5en.48xlarge (image `eeaa6801`), 1 GiB per transfer, 3 runs each, all `verify=OK`:
+
+| GPUs | Op | Transfers/GPU | Per-GPU GB/s | Sum GB/s | Combined (`agg_GBps`) | EFA NICs used |
+|---|---|---|---|---|---|---|
+| 1 | READ | 5 | 47.2 | 47.2 | 33 | 2 |
+| 1 | WRITE | 5 | 46.7 | 46.7 | 33 | 2 |
+| 8 | READ | 20 | 47.8 | 382.5 | 300 | 16 |
+| 8 | WRITE | 20 | 47.8 | 382.2 | 304 | 16 |
+
+382 GB/s is about 3.06 Tb/s of the node's 3.2 Tb/s (16 x 200 Gb/s). `agg_GBps` is lower because it
+includes the per-transfer verify and notification round-trip between transfers.
+
+The EFA byte counters read by `rdma statistic` wrap at 2^32 (4 GiB). The byte total is exact only
+while each NIC moves under 4 GiB per run (the defaults move 2.5 GiB per NIC). Above that, check that
+every expected NIC (2 per GPU) shows traffic.
+
 ### Success markers (what a pass looks like)
 
 | Suite | Pass condition |
 |---|---|
 | NCCL | every rank logs `NET/OFI Selected provider is efa … (found 16 nics)`; busbw reported; exit 0 |
 | DeepEP V2 | `Loaded gin plugin Libfabric_GDAKI`; no `host_register_iomem failed`; no `Failed to open gdr handle` (the workers run `privileged: true` so `/dev/gdrdrv` is in the pod); dispatch + combine complete on all 16 ranks |
-| NIXL | `NIXL backends created: ['LIBFABRIC']` and `LIBFABRIC backend selected`; `verify=OK` on every transfer; `NIXL_LF_RESULT PASS`; `NIXL_LF_RUN_DONE ... rc=0` on both pods; EFA `rdma_read_bytes` (in the `EFA_COUNTERS` lines) rises by 5 GiB per iteration |
+| NIXL | `NIXL backends created: ['LIBFABRIC']` and `LIBFABRIC backend selected`; `verify=OK` on every transfer; `NIXL_LF_RESULT PASS`; `NIXL_LF_RUN_DONE ... rc=0` on both pods; EFA `rdma_read_bytes` (in the `EFA_COUNTERS` lines) rises by 5 GiB per iteration (defaults; with `NIXL_OP=WRITE` the initiator's `rdma_write_bytes` rises instead, and with N GPUs it is N times as much) |
 
 Throughput floors for sign-off live in `validation-gate.yaml`; the gate compares
 a 3-run mean against each floor and blocks a regression.
