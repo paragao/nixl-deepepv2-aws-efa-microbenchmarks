@@ -457,19 +457,26 @@ The nightly's FA4 fix cuts decode TPOT by 58% / 44% / 36%, so 1P1D tok/s rises 2
 At 128 users the faster decode drains requests sooner and the single TP8 prefill becomes the
 bottleneck (TTFT 17.1 s); add prefill workers (2P1D) for that load.
 
-2P1D on this image: two TP8 prefill workers + one TP8 decode worker on three p5en nodes, the
-proxy round-robins prefills (50/50 split measured), same seeds. LIBFABRIC on 8/8 ranks in all
-three pods, 0 UCX, 16 EFA rails, 0 failed / 0 expired transfers, 0 failed requests in 1,812:
+More workers, same nightly build (`8a586734`), same seeds, one TP8 worker per p5en node. The
+proxy round-robins prefills and decodes (50/50 split measured on every role). LIBFABRIC on 8/8
+ranks in every pod, 0 UCX, 16 EFA rails, 0 failed / 0 expired transfers, 0 failed requests:
 
-| Users | 1P1D TP8 + TP8 (16 GPUs) | 2P1D TP8 x2 + TP8 (24 GPUs) |
-|---|---|---|
-| 8 | 429 / 6.16 / 17,040 | 436 / 6.15 / 16,446 |
-| 32 | 460 / 9.31 / 43,868 | 452 / 9.30 / 46,408 |
-| 128 | 17,142 / 13.38 / 56,809 | 597 / 23.11 / 70,784 |
+| Users | 1P1D (16 GPUs) | 2P1D (24 GPUs) | 2P2D (32 GPUs) |
+|---|---|---|---|
+| 8 | 429 / 6.16 / 17,040 | 436 / 6.15 / 16,446 | 425 / 5.64 / 17,492 |
+| 32 | 460 / 9.31 / 43,868 | 452 / 9.30 / 46,408 | 452 / 6.96 / 56,182 |
+| 128 | 17,142 / 13.38 / 56,809 | 597 / 23.11 / 70,784 | 3,298 / 12.88 / 102,417 |
+| tok/s per GPU, 128 users | 3,551 | 2,949 | 3,201 |
 
-At 128 users 2P1D cuts TTFT 29x (17.1 s -> 0.6 s) and lifts tok/s 25%. The single decode worker
-is now the bottleneck: TPOT rises 13.4 -> 23.1 ms, and tok/s per GPU drops 3,551 -> 2,949.
-At 8-32 users 2P1D gives no gain over 1P1D.
+- 2P1D fixes the 1P1D prefill bottleneck: TTFT at 128 users drops 29x (17.1 s -> 0.6 s), tok/s +25%.
+  Its single decode worker then saturates (TPOT 13.4 -> 23.1 ms).
+- 2P2D fixes that: TPOT at 128 users is back to 12.9 ms and tok/s is 102,417 (+45% over 2P1D, 1.8x
+  1P1D). TTFT rises to 3.3 s, so the two prefill workers are the limit again at 128 users.
+- At 8 users extra workers add nothing; at 32 users only the second decode worker helps (+21% tok/s).
+
+The 2P2D 32-user row is a clean rerun (480/480 requests). The first 2P2D run lost 1 of 480 requests
+to an HTTP read error in the benchmark proxy (`toy_proxy_server.py`), with no worker or NIXL error;
+its numbers (440 / 6.97 / 57,744) matched the rerun.
 
 Gemma-4-31B is dense, so DeepEP V2 (MoE expert-parallel) is present but not exercised by these tests.
 
