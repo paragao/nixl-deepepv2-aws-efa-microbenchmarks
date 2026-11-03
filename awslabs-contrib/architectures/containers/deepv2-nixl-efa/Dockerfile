@@ -1,42 +1,47 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.0 (LIBFABRIC + UCX) image.
+# DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.0 (LIBFABRIC over EFA) image.
 #
-# The lower half of this file is the awslabs reference, copied verbatim from
+# The lower half of this file follows the awslabs reference
 #   awsome-distributed-ai/micro-benchmarks/expert-parallelism/deepep-v2-benchmark/deepep.Dockerfile
-# (vendored unchanged at ./reference/deepep.Dockerfile). It builds the full
-# EFA-GDA stack DeepEP V2 needs: EFA installer 1.50.0 (the >=1.50 floor that
-# ships the EFA-GDA aws-ofi-nccl GIN plugin, type 5), GIN-capable NCCL 2.31.2,
-# GDRCopy v2.5.2, torch 2.11.0+cu130, and DeepEP V2 from amazon-contributing/DeepEP.
+# (vendored unchanged at ./reference/deepep.Dockerfile). Changes from it: EFA installer
+# 1.51.0 (sha256-checked), DeepEP pinned to a commit, NCCL pinned once (in the torch
+# layer), and the build-only debhelper/devscripts dropped. It builds the full EFA-GDA
+# stack DeepEP V2 needs: EFA installer (>=1.50 ships the EFA-GDA aws-ofi-nccl GIN
+# plugin, type 5), GIN-capable NCCL 2.31.2, GDRCopy v2.5.2, torch 2.11.0+cu130, and
+# DeepEP V2 from amazon-contributing/DeepEP.
 #
-# The upper half layers NIXL v1.5.0 on top, built from source with its LIBFABRIC
-# backend (the EFA data path NIXL uses for KV-cache transfer) and its UCX backend.
-# Both EP transports therefore ride the same EFA installer 1.50.0 userspace:
+# The upper half layers NIXL v1.5.0 on top, built from source with ONLY its LIBFABRIC
+# backend (the EFA data path NIXL uses for KV-cache transfer). EFA does not support
+# UCX, so there is no UCX build and no UCX plugin. Both transports ride one EFA stack:
 #   - DeepEP V2  -> NCCL GIN (EFA-GDA, type 5) via aws-ofi-nccl
 #   - NIXL 1.5.0 -> LIBFABRIC plugin over the same libfabric/EFA stack
+# NIXL's LIBFABRIC and backend-free C++ tests ship in /opt/nixl-tests.
 #
 # Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300
 #        + RTX PRO 6000 Blackwell on g7e):
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
 #     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
 #     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
-#     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.50.0 .
+#     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.51.0 .
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
 
 ARG GDRCOPY_VERSION=v2.5.2
-ARG EFA_INSTALLER_VERSION=1.50.0
-ARG DEEPEP_REF="main"
+# 1.51.0 = the EFA installer vLLM's own EFA image (vllm/vllm-openai:v0.33.0-efa) uses.
+ARG EFA_INSTALLER_VERSION=1.51.0
+ARG EFA_INSTALLER_SHA256=83993044fa4df3dc2f8b5c2f7051d61b9689441be023a2c92ea51d3f53f2465c
+# amazon-contributing/DeepEP, same commit as Dockerfile.vllm (EFA hybrid kernels + fixes).
+ARG DEEPEP_REF="d75f22a5e07c95eb0bae94ad6445a5009c06c886"
 ARG NCCL_VERSION=2.31.2
 ARG PYTHON_VERSION=3.10
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_CUDA_INDEX=cu130
 # NIXL release to build (git tag in ai-dynamo/nixl). v1.5.0 = 1683cf3 (2026-09-30).
 ARG NIXL_REF="v1.5.0"
-# UCX version NIXL is tested against (README: 1.23.x). NIXL's UCX plugin needs it.
-ARG UCX_VERSION="v1.23.x"
+ARG NIXL_COMMIT=1683cf3b7f3d11674c03c5e861cea22339876c96
 
 # CUDA architecture(s), semicolon-separated. Compute-capability mapping:
 #   9.0  = Hopper          -> H100 / H200          (sm_90)
@@ -79,8 +84,6 @@ RUN apt-get install -y --no-install-recommends \
     check \
     cmake \
     curl \
-    debhelper \
-    devscripts \
     git \
     gcc \
     gdb \
@@ -117,11 +120,12 @@ ENV LIBRARY_PATH="${GDRCOPY_PREFIX}/lib:$LIBRARY_PATH"
 ENV PATH="${GDRCOPY_PREFIX}/bin:$PATH"
 
 #################################################
-## Install EFA installer (1.50.0 -> bundles the EFA-GDA aws-ofi-nccl GIN plugin
-## and the libfabric NIXL's LIBFABRIC backend links against). <1.50 is rejected.
+## Install EFA installer (>=1.50 bundles the EFA-GDA aws-ofi-nccl GIN plugin and
+## the libfabric NIXL's LIBFABRIC backend links against). <1.50 is rejected.
 RUN cd $HOME && \
     curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz \
     https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
+    echo "${EFA_INSTALLER_SHA256}  aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" | sha256sum -c - && \
     tar -xf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz && \
     cd aws-efa-installer && \
     apt-get update && \
@@ -158,12 +162,10 @@ RUN pip3 install torch==${TORCH_VERSION} numpy --index-url https://download.pyto
        || { echo "FATAL: torch-layer libnccl.so.2 lacks GIN symbol"; exit 1; }
 
 ################################ DeepEP v2 ########################################
-# Installs GIN-capable NCCL from PyPI then builds DeepEP V2 against it. The
-# setup script errors out loudly if the NCCL lacks nccl_device.h (GIN API).
+# Builds DeepEP V2 against the GIN-capable NCCL the torch layer already pinned (no
+# second NCCL reinstall). The setup script errors out loudly if the NCCL lacks
+# nccl_device.h (GIN API).
 RUN --mount=type=bind,source=setup_deepep_gin.sh,target=/tmp/setup_deepep_gin.sh \
-    pip3 uninstall -y nvidia-nccl-cu13 nvidia-nccl-cu12 nvidia-nccl 2>/dev/null || true && \
-    CUDA_MAJOR=$(nvcc --version | grep -oP 'release \K[0-9]+') && \
-    pip3 install --no-deps nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION} && \
     TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
     /tmp/setup_deepep_gin.sh \
     --deepep-ref $DEEPEP_REF \
@@ -211,38 +213,10 @@ RUN NCCL_LIB="$(dirname "$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/
        || { echo "FATAL: nccl-tests binaries missing"; exit 1; }
 ENV PATH="${NCCL_TESTS_PREFIX}/build:$PATH"
 
-################################ UCX (for NIXL) #################################
-# NIXL's UCX backend needs UCX; README pins 1.23.x. Built with CUDA + GDRCopy +
-# verbs so the UCX transport can use GPUDirect, same recipe as the NIXL README.
-ARG UCX_PREFIX="/opt/ucx"
-RUN git clone https://github.com/openucx/ucx.git /tmp/ucx \
-    && cd /tmp/ucx \
-    && git checkout ${UCX_VERSION} \
-    && ./autogen.sh \
-    && ./contrib/configure-release-mt \
-        --prefix=${UCX_PREFIX} \
-        --enable-shared \
-        --disable-static \
-        --disable-doxygen-doc \
-        --enable-optimizations \
-        --enable-cma \
-        --enable-devel-headers \
-        --with-cuda=${CUDA_HOME} \
-        --with-verbs \
-        --with-dm \
-        --with-gdrcopy=${GDRCOPY_PREFIX} \
-    && make -j"$(nproc)" \
-    && make -j"$(nproc)" install-strip \
-    && ldconfig \
-    && rm -rf /tmp/ucx
-ENV LD_LIBRARY_PATH="${UCX_PREFIX}/lib:$LD_LIBRARY_PATH"
-ENV PATH="${UCX_PREFIX}/bin:$PATH"
-ENV PKG_CONFIG_PATH="${UCX_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
 ################################ NIXL v1.5.0 ####################################
-# Build from source with meson/ninja. hwloc is needed by the LIBFABRIC plugin;
-# the EFA installer above already placed libfabric (>=2.6) on the system, which
-# the LIBFABRIC backend discovers via pkg-config. uv + tomlkit per the README.
+# Build from source with meson/ninja, LIBFABRIC plugin ONLY (EFA does not support
+# UCX, so there is no UCX build). hwloc is needed by the LIBFABRIC plugin; the EFA
+# installer above placed libfabric (>=2.6) under /opt/amazon/efa.
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
         libhwloc-dev \
         libnuma-dev \
@@ -250,106 +224,58 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 RUN pip3 install meson ninja pybind11 tomlkit
 
 # Make the EFA installer's libfabric discoverable to meson/pkg-config.
-ENV PKG_CONFIG_PATH="/opt/amazon/efa/lib/pkgconfig:/opt/amazon/efa/lib64/pkgconfig:${PKG_CONFIG_PATH}"
+ENV PKG_CONFIG_PATH="/opt/amazon/efa/lib/pkgconfig:/opt/amazon/efa/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-# The EFA installer places libfabric under /opt/amazon/efa. Point meson at it so
-# the LIBFABRIC backend links against the EFA (>=2.6) libfabric, not a system one.
 ARG LIBFABRIC_PATH="/opt/amazon/efa"
 ARG NIXL_PREFIX="/opt/nixl"
-# enable_plugins keys are UPPERCASE (src/plugins/meson.build). A requested-but-
-# unfindable plugin ERRORS (is_explicit_enable), so a missing libfabric fails the
-# build loudly instead of silently producing a NIXL without the EFA path.
-# nixl_cuda_arch_list="90,100,103,120" — NIXL's meson option is a COMMA-separated
-# string (NOT semicolons, unlike TORCH_CUDA_ARCH_LIST); Hopper+Blackwell+Ultra+RTX (g7e).
-# build_nixl_ep=true builds the EP example.
-# --buildtype=debugoptimized (-O2 -g): NIXL only compiles the test/ subdir (which
-# holds nixl_test) when buildtype != 'release' — the root meson.build gates
-# subdir('test') on that. -Dwerror=false: NIXL defaults werror=true, and under
-# -O2 inlining GCC raises a FALSE-POSITIVE -Wmaybe-uninitialized inside the EFA
-# SDK header (fi_domain.h fi_mr_reg), which -Werror turns fatal and breaks the
-# libfabric utils compile. Downgrading werror lets it build; binaries unaffected.
+# - enable_plugins=LIBFABRIC (keys are UPPERCASE). A requested-but-unbuildable plugin
+#   is a meson ERROR (is_explicit_enable), so a missing libfabric fails loudly.
+# - no ucx_path, no build_nixl_ep: NIXL EP hard-codes the UCX backend.
+# - nixl_cuda_arch_list is COMMA-separated (not ;) -- Hopper+Blackwell+Ultra+RTX (g7e).
+# - buildtype=debugoptimized (-O2 -g): NIXL compiles test/ only when buildtype !=
+#   'release' (root meson.build gates subdir('test') on that).
+# - werror=false: under -O2 GCC raises a FALSE-POSITIVE -Wmaybe-uninitialized in the
+#   EFA SDK header (fi_domain.h fi_mr_reg) that -Werror makes fatal.
+# Tests shipped in /opt/nixl-tests: the LIBFABRIC ones and the backend-free ones.
+# Not shipped: nixl_test, agent_example, nixl_example (all hard-code createBackend("UCX")).
 RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     && cd /tmp/nixl \
-    && git checkout ${NIXL_REF} \
+    && git checkout ${NIXL_COMMIT} \
+    && [ "$(git rev-parse "${NIXL_REF}^{commit}")" = "${NIXL_COMMIT}" ] \
     && git submodule update --init --recursive \
     && meson setup /tmp/nixl/build \
         --prefix=${NIXL_PREFIX} \
         --buildtype=debugoptimized \
         -Dwerror=false \
-        -Ducx_path=${UCX_PREFIX} \
         -Dlibfabric_path=${LIBFABRIC_PATH} \
         -Dinstall_headers=true \
         -Dbuild_tests=true \
-        -Denable_plugins=UCX,LIBFABRIC,POSIX \
+        -Denable_plugins=LIBFABRIC \
         -Dnixl_cuda_arch_list="90,100,103,120" \
-        -Dbuild_nixl_ep=true \
     && ninja -C /tmp/nixl/build \
     && ninja -C /tmp/nixl/build install \
     && ldconfig \
-    # Fail the build if the LIBFABRIC backend plugin was not actually produced.
-    # The plugin is named libplugin_LIBFABRIC.so (meson name_prefix=libplugin_,
-    # target 'LIBFABRIC') and installs under <prefix>/lib*/.../plugins, so search
-    # the whole prefix case-insensitively rather than guessing a fixed path.
     && ( find ${NIXL_PREFIX} -iname 'libplugin_libfabric*.so' | grep -q . \
          && echo "OK: LIBFABRIC plugin present at $(find ${NIXL_PREFIX} -iname 'libplugin_libfabric*.so')" ) \
        || ( echo "FATAL: NIXL built without LIBFABRIC backend plugin; tree was:" \
             && find ${NIXL_PREFIX} -iname '*.so' -path '*plugin*' && exit 1 ) \
-    # Preserve the ONE tested use case: test/nixl_test.cpp -> the `nixl_test`
-    # executable. NIXL only builds the test/ subdir when buildtype != 'release'
-    # (root meson.build gates `subdir('test')` on that), so we set
-    # --buildtype=debugoptimized above; the target has install:true so it lands
-    # in <prefix>/bin. Resolve the real path into a var and dump the tree if it
-    # is genuinely absent, rather than cp an empty string.
+    && ! find ${NIXL_PREFIX} -iname 'libplugin_ucx*.so' | grep -q . \
     && mkdir -p /opt/nixl-tests \
-    && NIXL_TEST_BIN="$(find ${NIXL_PREFIX}/bin /tmp/nixl/build -name nixl_test -type f -perm -u+x 2>/dev/null | head -1)" \
-    && if [ -n "${NIXL_TEST_BIN}" ]; then \
-         cp "${NIXL_TEST_BIN}" /opt/nixl-tests/nixl_test; \
-       else \
-         echo "FATAL: nixl_test binary (test/nixl/nixl_test.cpp) not built; candidates:"; \
-         find ${NIXL_PREFIX} /tmp/nixl/build -name 'nixl_test*' 2>/dev/null; exit 1; \
-       fi \
-    && test -x /opt/nixl-tests/nixl_test \
-       && echo "OK: nixl_test binary preserved at /opt/nixl-tests/nixl_test" \
-       || { echo "FATAL: nixl_test binary (test/nixl_test.cpp) not built"; exit 1; } \
-    # Install the Python bindings WITHOUT deps: a plain `pip install .` re-resolves
-    # torch's dependency chain and pulls nvidia-nccl-cu13 2.28.9 OVER the GIN-capable
-    # 2.31.2 that DeepEP V2 was compiled against, which breaks `import deep_ep` with
-    # `undefined symbol: ncclCommQueryProperties` (a 2.31 GIN symbol). --no-deps keeps
-    # the pinned GIN NCCL intact; torch/numpy are already present from the base.
+    && for t in libfabric_topology_test rail_active_refcount_test desc_example \
+                p2p_test serdes_test telemetry_reader; do \
+         f="$(find ${NIXL_PREFIX}/bin /tmp/nixl/build -name "$t" -type f -perm -u+x 2>/dev/null | head -1)"; \
+         [ -n "$f" ] || { echo "FATAL: NIXL test $t not built"; exit 1; }; \
+         cp "$f" /opt/nixl-tests/; \
+       done \
+    && (cp ${NIXL_PREFIX}/bin/*-topo.xml /opt/nixl-tests/ 2>/dev/null || true) \
+    && rm -f ${NIXL_PREFIX}/bin/nixl_test ${NIXL_PREFIX}/bin/agent_example ${NIXL_PREFIX}/bin/nixl_example \
+    && echo "OK: NIXL tests in /opt/nixl-tests: $(ls /opt/nixl-tests | tr '\n' ' ')" \
+    # Python bindings WITHOUT deps: a plain `pip install .` re-resolves torch's chain
+    # and pulls nvidia-nccl-cu13 2.28.9 OVER the GIN 2.31.2 DeepEP V2 links against.
     && pip3 install --no-deps /tmp/nixl \
     && cd / && rm -rf /tmp/nixl \
-    # Install the thin `nixl` meta-wheel so BOTH `import nixl` and the variant
-    # `import nixl_cu13` work (source builds name the module nixl_cu13).
-    && pip3 install --no-deps nixl
-
-# ---------------------------------------------------------------------------
-# FINAL layer: re-assert the GIN-capable NCCL and PROVE it at the .so level.
-#
-# Why its own layer (not chained into the NIXL RUN): torch==2.11.0 (step #16)
-# bundles the GIN-LESS nvidia-nccl-cu13 2.28.9, whose libnccl.so.2 is written to
-# .../nvidia/nccl/lib/ in a layer that gets CACHED/deduped. A `pip install` of
-# 2.31.2 chained inside the big NIXL RUN updated the dist-info metadata but the
-# exported image still carried the stale 2.28.9 .so blob (BuildKit content dedup
-# across cached lower layers). Isolating the re-pin as the last layer, busting its
-# cache, and asserting on the BINARY (file size + the GIN symbol via `nm`, not pip
-# metadata) guarantees the committed .so is the real 2.31.2 GIN build DeepEP needs.
-ARG NCCL_REPIN_BUST=v12
-# Re-assert the GIN-capable NCCL at the STANDARD pip path (.../nvidia/nccl/lib),
-# which is where deep_ep's _C.so RUNPATH resolves libnccl.so.2 and where DeepEP's
-# find_nccl_root() looks -- so no non-standard path, LD_PRELOAD or patchelf is
-# needed (a consumer running this image gets the fix with zero extra env). torch
-# bundles the GIN-LESS 2.28.9; this reinstalls 2.31.2 (which EXPORTS the GIN symbol
-# ncclCommQueryProperties) over it. The build is run with --no-cache so no stale
-# 2.28.9 layer survives for BuildKit to dedup the committed .so back to.
-RUN pip3 uninstall -y nvidia-nccl-cu13 2>/dev/null || true; \
-    pip3 install --no-deps --no-cache-dir --force-reinstall "nvidia-nccl-cu13==2.31.2"; \
-    SO="$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/libnccl.so.2' 2>/dev/null | head -1)"; \
-    echo "GIN NCCL .so: $SO"; ls -la "$SO" || { echo "FATAL: libnccl.so.2 not found"; exit 1; }; \
-    if nm -D "$SO" 2>/dev/null | grep -q ncclCommQueryProperties; then \
-        echo "OK: libnccl.so.2 exports GIN symbol ncclCommQueryProperties"; \
-    else \
-        echo "FATAL: libnccl.so.2 lacks GIN symbol ncclCommQueryProperties (stale 2.28.9)"; exit 1; \
-    fi
+    # The thin `nixl` meta-wheel, so both `import nixl` and `import nixl_cu13` work.
+    && pip3 install --no-deps "nixl==1.5.0"
 
 # ===========================================================================
 # SQUASH STAGE: flatten the whole builder tree into a SINGLE layer.
@@ -395,8 +321,8 @@ ENV LD_LIBRARY_PATH="${NIXL_PREFIX}/lib/x86_64-linux-gnu:${NIXL_PREFIX}/lib:${NI
 ENV PATH="${NIXL_PREFIX}/bin:/opt/amazon/openmpi/bin:/opt/amazon/efa/bin:/opt/gdrcopy/bin:/opt/nccl-tests/build:$PATH"
 # NIXL discovers its backend plugins from this directory at runtime. It opendir()s
 # this value LITERALLY (it does NOT split on ':'), so a colon-joined candidate
-# list makes the open fail -> createBackend('UCX') fails -> nixl_test segfaults.
-# Point it at the ONE real plugin dir (where libplugin_{UCX,LIBFABRIC,POSIX}.so land).
+# list makes the open fail -> createBackend('LIBFABRIC') fails.
+# Point it at the ONE real plugin dir (where libplugin_LIBFABRIC.so lands).
 ENV NIXL_PLUGIN_DIR="${NIXL_PREFIX}/lib/x86_64-linux-gnu/plugins"
 
 # OMPI / PMIx / NCCL interface hints (builder-stage ENV did not cross the boundary).
@@ -489,9 +415,20 @@ RUN set -e; \
             && echo "OK: nccl-tests $b on PATH" \
             || { echo "FATAL: nccl-tests $b missing from squashed image"; exit 1; }; \
     done; \
-    [ -x /opt/nixl-tests/nixl_test ] \
-        && echo "OK: nixl_test binary (test/nixl_test.cpp) present" \
-        || { echo "FATAL: nixl_test binary missing from squashed image"; exit 1; }; \
+    for t in libfabric_topology_test rail_active_refcount_test desc_example \
+             p2p_test serdes_test telemetry_reader; do \
+        [ -x "/opt/nixl-tests/$t" ] || { echo "FATAL: NIXL test $t missing from squashed image"; exit 1; }; \
+        if ldd "/opt/nixl-tests/$t" | grep -q 'not found'; then \
+            echo "FATAL: NIXL test $t has unresolved libraries"; exit 1; \
+        fi; \
+    done; \
+    echo "OK: NIXL tests present and resolvable in /opt/nixl-tests"; \
+    /opt/nixl-tests/serdes_test >/dev/null || { echo "FATAL: serdes_test failed"; exit 1; }; \
+    echo "OK: NIXL tests run (serdes_test)"; \
+    [ -f "$NIXL_PLUGIN_DIR/libplugin_LIBFABRIC.so" ] \
+        && echo "OK: LIBFABRIC plugin in NIXL_PLUGIN_DIR" \
+        || { echo "FATAL: no libplugin_LIBFABRIC.so in $NIXL_PLUGIN_DIR"; exit 1; }; \
+    if ls "$NIXL_PLUGIN_DIR" | grep -qi ucx; then echo "FATAL: a UCX plugin shipped"; exit 1; fi; \
     python3 -c "import sys; \
 import deep_ep; print('OK import deep_ep'); \
 import importlib.util as u; s=u.find_spec('nixl_cu13') or u.find_spec('nixl'); \
@@ -499,7 +436,8 @@ print('OK nixl bindings:', s.name) if s else (print('FATAL: no nixl'), sys.exit(
 from importlib.metadata import version as v; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
 sys.exit(0 if g=='2.31.2' else (print('FATAL: NCCL', g, 'need 2.31.2') or 1))"
 
-LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e)"
+LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e)"
 LABEL nixl.ref="v1.5.0"
-LABEL deepep.ref="amazon-contributing/DeepEP@main"
-LABEL efa.installer="1.50.0"
+ARG DEEPEP_REF=d75f22a5e07c95eb0bae94ad6445a5009c06c886
+LABEL deepep.ref="amazon-contributing/DeepEP@${DEEPEP_REF}"
+LABEL efa.installer="1.51.0"
