@@ -1,0 +1,48 @@
+# NIXL LIBFABRIC (EFA) gate, initiator side. Runs on ${NODE_0}; reads 1 GiB GPU->GPU from the
+# target with ONLY the LIBFABRIC backend, 5 transfers per iteration, data verified each time.
+# Apply the target (nixl-lf-target-validate.yaml) first, then set NIXL_TARGET_IP to its pod IP:
+#   export NIXL_TARGET_IP=$(kubectl -n ${K8S_NAMESPACE} get pod nixl-lf-target -o jsonpath='{.status.podIP}')
+#   envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f -
+# Pass (defaults): every iteration prints "LIBFABRIC backend selected", "verify=OK" x5 and
+# "NIXL_LF_RESULT PASS", rc=0, and EFA rdma_read_bytes rises by 5 GiB per iteration.
+# With N GPUs, each GPU prints its own lines ([gpuN] prefix) and NIXL_LF_AGG gives the total GB/s;
+# with NIXL_OP=WRITE, EFA rdma_write_bytes rises on this node instead.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nixl-lf-initiator
+  namespace: ${K8S_NAMESPACE}
+  labels: {app: nixl-lf-test, role: initiator}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: "${NODE_0}"}
+  tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+  containers:
+  - name: initiator
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}@${IMAGE_DIGEST}
+    imagePullPolicy: Always
+    env:
+    - {name: NVIDIA_GDRCOPY, value: "enabled"}
+    - {name: NIXL_ITERS, value: "1 2 3"}
+    # Optional knobs (see nixl-lf-run.sh); empty = default. Export before envsubst, e.g.
+    #   NIXL_GPUS="0 1 2 3 4 5 6 7" (all 16 EFA NICs)  NIXL_OP=WRITE  NIXL_TEST_ARGS="--iters 20"
+    # NIXL_GPUS and NIXL_TEST_ARGS must match on both pods.
+    - {name: NIXL_GPUS, value: "${NIXL_GPUS}"}
+    - {name: NIXL_OP, value: "${NIXL_OP}"}
+    - {name: NIXL_TEST_ARGS, value: "${NIXL_TEST_ARGS}"}
+    command: ["/bin/bash", "-c"]
+    args: ["bash /scripts/nixl-lf-run.sh initiator ${NIXL_TARGET_IP}"]
+    # privileged: exposes /dev/gdrdrv (GPU memory registration over EFA) and lets
+    # `rdma statistic` read the EFA counters.
+    securityContext: {privileged: true, capabilities: {add: ["SYS_ADMIN", "IPC_LOCK"]}}
+    volumeMounts:
+    - {name: shmem, mountPath: /dev/shm}
+    - {name: scripts, mountPath: /scripts}
+    resources:
+      limits: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16}
+      requests: {nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16, cpu: "16", memory: 64Gi}
+  volumes:
+  - name: shmem
+    emptyDir: {medium: Memory, sizeLimit: 32Gi}
+  - name: scripts
+    configMap: {name: nixl-lf-scripts}

@@ -90,7 +90,11 @@ spec:
             env:
             - name: NVIDIA_GDRCOPY
               value: "enabled"
+            # privileged: NVIDIA_GDRCOPY=enabled alone does not put /dev/gdrdrv in the pod on
+            # this EKS setup, and without it aws-ofi-nccl fails "Failed to open gdr handle"
+            # -> "NCCL GIN is unavailable". privileged exposes the host's /dev/gdrdrv.
             securityContext:
+              privileged: true
               capabilities:
                 add: ["SYS_ADMIN", "IPC_LOCK"]
             volumeMounts:
