@@ -160,8 +160,10 @@ RUN --mount=type=bind,source=setup_deepep_gin.sh,target=/tmp/setup_deepep_gin.sh
 # sets NCCL_NET_PLUGIN=ofi / NCCL_TUNER_PLUGIN=ofi (resolved via ld.so.conf.d).
 ENV FI_PROVIDER=efa \
     NCCL_GIN_TYPE=5 \
-    NVIDIA_GDRCOPY=enabled \
-    NIXL_ETCD_ENDPOINTS=""
+    NVIDIA_GDRCOPY=enabled
+# Do NOT set NIXL_ETCD_ENDPOINTS here: NIXL 1.5.0 treats a set-but-empty value as an error
+# ("Config parameter 'NIXL_ETCD_ENDPOINTS' needs non-empty value") and every nixl_agent(),
+# including vLLM's NixlConnector, fails. Unset = no etcd, peers exchange metadata directly.
 
 # --- License hygiene ------------------------------------------------------------
 # The base image ships build cruft the license gate blocks; nothing at run time uses it:
@@ -223,6 +225,9 @@ sys.exit(0 if vl == '${VLLM_VERSION}' and t.startswith('${TORCH_VERSION}+') and 
     # Running the tests needs the GPU driver (libcuda.so.1), which a build does not have;
     # the pipeline runs them in a GPU pod.
     echo "OK: every NIXL test resolves its libraries (libcuda.so.1 comes from the driver at run time)"; \
+    [ -z "${NIXL_ETCD_ENDPOINTS+x}" ] || [ -n "${NIXL_ETCD_ENDPOINTS}" ] \
+        && echo "OK: NIXL_ETCD_ENDPOINTS is unset or non-empty (an empty value breaks nixl_agent)" \
+        || { echo "FATAL: NIXL_ETCD_ENDPOINTS is set but empty"; exit 1; }; \
     python3 -c "import deep_ep, sys; \
 ok = hasattr(deep_ep, 'ElasticBuffer'); print('deep_ep', deep_ep.__file__, 'ElasticBuffer:', ok); \
 sys.exit(0 if ok else 1)"; \
