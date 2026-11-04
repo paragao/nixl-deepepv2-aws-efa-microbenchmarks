@@ -163,6 +163,31 @@ ENV FI_PROVIDER=efa \
     NVIDIA_GDRCOPY=enabled \
     NIXL_ETCD_ENDPOINTS=""
 
+# --- License hygiene ------------------------------------------------------------
+# The base image ships build cruft the license gate blocks; nothing at run time uses it:
+#   - setuptools/_vendor/autocommand (LGPL-3.0) and pkg_resources/tests (my-test-package
+#     fixture, no metadata), as in Dockerfile;
+#   - software-properties-common (add-apt-repository) and the system-Python packages only
+#     it pulls in: python3-apt (GPL), python3-gi / launchpadlib / lazr.* / wadllib (LGPL),
+#     and blinker / pyparsing (no licence metadata) via oauthlib / httplib2. vLLM runs from
+#     /usr/local/lib/python3.12/dist-packages and imports none of them.
+RUN set -e; \
+    for d in $(find /usr/local/lib /usr/lib -type d -path '*/setuptools/_vendor' 2>/dev/null); do \
+        rm -rf "$d/autocommand" "$d"/autocommand-*.dist-info; \
+    done; \
+    for d in $(find /usr/local/lib /usr/lib -type d -path '*/pkg_resources/tests' 2>/dev/null); do \
+        rm -rf "$d"; \
+    done; \
+    apt-get purge -y software-properties-common python3-software-properties python3-apt \
+        python3-launchpadlib python3-lazr.restfulclient python3-lazr.uri python3-wadllib \
+        python3-gi python3-oauthlib python3-blinker python3-httplib2 python3-pyparsing; \
+    rm -rf /var/lib/apt/lists/*; \
+    ! find /usr/local/lib /usr/lib -iname 'autocommand*' 2>/dev/null | grep -q . \
+      && ! find /usr/local/lib /usr/lib -ipath '*my-test-package*' 2>/dev/null | grep -q . \
+      && ! dpkg -l software-properties-common python3-apt python3-gi python3-launchpadlib 2>/dev/null | grep -q '^ii' \
+      && echo "OK: autocommand, my-test-package and the apt-only Python packages removed" \
+      || { echo "FATAL: license hygiene incomplete"; exit 1; }
+
 # --- Gates (no GPU in the build; binary, loader and import level) -------------------
 RUN set -e; \
     python3 -c "import sys; from importlib.metadata import version as v; \

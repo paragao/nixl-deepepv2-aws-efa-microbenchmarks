@@ -365,6 +365,10 @@ license_policy:
     loguru: MIT                # Delgan/loguru LICENSE
     quack-kernels: Apache-2.0  # Dao-AILab/quack LICENSE; wheel 0.6.5 dist-info/licenses/LICENSE
     oss-harmony: Apache-2.0    # fork of openai/harmony (Apache-2.0); wheel 0.0.11 dist-info/licenses/LICENSE
+    # vllm/vllm-openai:v0.33.0-x86_64-efa base (slim Dockerfile.vllm), checked 2026-11-04 in image 192fe945:
+    accelerate: Apache-2.0     # METADATA "License: Apache" + dist-info/licenses/LICENSE = Apache License 2.0
+    gguf: MIT                  # ggml-org/llama.cpp; dist-info/licenses/LICENSE = MIT
+    mooncake-transfer-engine*: Apache-2.0   # kvcache-ai/Mooncake; classifier Apache Software License (wheel has no LICENSE file)
 
   review_note: >
     Exceptions + pins were set from the actual syft SBOM of image
