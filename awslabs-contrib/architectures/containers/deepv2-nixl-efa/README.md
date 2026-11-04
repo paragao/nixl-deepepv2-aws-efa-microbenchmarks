@@ -444,18 +444,19 @@ pinned build matches the earlier unpinned one within 1%. It also carries NIXL ov
 stock vLLM images cannot do (they ship no libfabric). 0 failed requests in 660.
 
 Disaggregated 1P1D across two p5en nodes, NIXL LIBFABRIC over EFA (`NixlConnector`, FA4, fp8
-weights; same seeds 4xxx/5xxx/6xxx in every column). On this image: LIBFABRIC on 8/8 ranks per pod,
-0 UCX, 16 EFA rails, 8 transfers x 393 MB per request, 0 failed / 0 expired transfers:
+weights; same seeds 4xxx/5xxx/6xxx in every column). On both sm_120 builds: LIBFABRIC on 8/8 ranks per
+pod, 0 UCX, 16 EFA rails, 8 transfers x 393 MB per request, 0 failed / 0 expired transfers:
 
-| Users | TP8 + TP8, nightly build (`8a586734`) | TP8 + TP8, vLLM 0.32.0 | TP4 + TP4, vLLM 0.32.0 |
-|---|---|---|---|
-| 8 | 429 / 6.16 / 17,040 | 499 / 14.56 / 7,447 | 618 / 15.26 / 7,035 |
-| 32 | 460 / 9.31 / 43,868 | 504 / 16.58 / 25,946 | 637 / 17.75 / 23,205 |
-| 128 | 17,142 / 13.38 / 56,809 | 10,635 / 21.04 / 51,216 | 32,817 / 19.14 / 33,273 |
+| Users | TP8 + TP8, v0.33.0 (`eeaa6801`) | TP8 + TP8, nightly build (`8a586734`) | TP8 + TP8, vLLM 0.32.0 | TP4 + TP4, vLLM 0.32.0 |
+|---|---|---|---|---|
+| 8 | 427 / 6.16 / 17,046 | 429 / 6.16 / 17,040 | 499 / 14.56 / 7,447 | 618 / 15.26 / 7,035 |
+| 32 | 453 / 9.30 / 43,911 | 460 / 9.31 / 43,868 | 504 / 16.58 / 25,946 | 637 / 17.75 / 23,205 |
+| 128 | 17,256 / 13.38 / 56,683 | 17,142 / 13.38 / 56,809 | 10,635 / 21.04 / 51,216 | 32,817 / 19.14 / 33,273 |
 
 The nightly's FA4 fix cuts decode TPOT by 58% / 44% / 36%, so 1P1D tok/s rises 2.3x / 1.7x / 1.1x at 8 / 32 / 128 users.
 At 128 users the faster decode drains requests sooner and the single TP8 prefill becomes the
-bottleneck (TTFT 17.1 s); add prefill workers (2P1D) for that load.
+bottleneck (TTFT 17.1 s); add prefill workers (2P1D) for that load. v0.33.0 matches the nightly
+build within 0.2% tok/s at every load (0 failed requests in 1,812).
 
 More workers, same nightly build (`8a586734`), same seeds, one TP8 worker per p5en node. The
 proxy round-robins prefills and decodes (50/50 split measured on every role). LIBFABRIC on 8/8
