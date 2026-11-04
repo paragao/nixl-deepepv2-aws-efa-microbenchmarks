@@ -338,11 +338,10 @@ ENV NVIDIA_GDRCOPY=enabled \
 
 ################################ Runtime hints ##################################
 # DeepEP V2 EFA-GDA (GIN type 5) runtime selection; see awslabs README.
-# FI_EFA_USE_UNSOLICITED_WRITE_RECV=0: libfabric >= 2.0 turns unsolicited write recv on by
-# default, and it can lose remote write completions under load. NIXL also turns it off
-# per endpoint; the env var covers every other libfabric user in the image too.
+# Do NOT set FI_EFA_USE_UNSOLICITED_WRITE_RECV=0 image-wide: it hangs aws-ofi-nccl's GIN
+# GDAKI createContext (DeepEP V2 EFA-GDA never starts). NIXL 1.5.2 disables unsolicited
+# write recv per endpoint itself ("Successfully disabled unsolicited write recv for rail N").
 ENV FI_PROVIDER=efa \
-    FI_EFA_USE_UNSOLICITED_WRITE_RECV=0 \
     NCCL_GIN_TYPE=5
 
 # NCCL net/tuner plugin selection. The aws-ofi-nccl plugin ships as
