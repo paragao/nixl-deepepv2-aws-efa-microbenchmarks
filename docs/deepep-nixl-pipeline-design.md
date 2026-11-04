@@ -2,7 +2,7 @@
 
 **Status:** Design / for review
 **Owner:** paragao
-**Last updated:** 2026-10-22
+**Last updated:** 2026-11-04 (branch `refactor/slim-dockerfiles`: LIBFABRIC-only NIXL, EFA 1.51.0, vLLM image on `vllm/vllm-openai:v0.33.0-x86_64-efa`)
 **Audience:** anyone building GPU-collective container images (DeepEP V2, NIXL) on AWS and wanting a reproducible, scanned, cluster-validated build that ends in an upstream contribution.
 
 > **Note on repo location:** this doc uses `awslabs/awsome-distributed-ai` as a
@@ -22,9 +22,15 @@ EFA (Elastic Fabric Adapter) userspace stack:
 - **DeepEP V2** — Mixture-of-Experts dispatch/combine over **NCCL GIN** (GPUDirect
   Async kernel-initiated RDMA, aws-ofi-nccl plugin **type 5**, EFA-GDA path).
 - **NIXL v1.5.0** — KV-cache / tensor transfer over its **LIBFABRIC** backend
-  (same EFA libfabric) and its **UCX** backend.
-- **EFA installer 1.50.0** — the `>=1.50` floor that ships the EFA-GDA
-  aws-ofi-nccl GIN plugin and a libfabric (`>=2.6`) both transports link against.
+  (same EFA libfabric). EFA does not support UCX, so LIBFABRIC is the only NIXL
+  backend built, shipped or tested.
+- **EFA installer 1.51.0** (sha256-checked) — `>=1.50` ships the EFA-GDA
+  aws-ofi-nccl GIN plugin and the libfabric both transports link against. 1.51.0
+  is the version vLLM's own EFA image uses.
+
+Two images come out of the recipe: the base `Dockerfile` (built from
+`nvidia/cuda:13.0.2-devel`, torch 2.11.0, Python 3.10) and `Dockerfile.vllm`
+(built on `vllm/vllm-openai:v0.33.0-x86_64-efa`, pinned by digest). See §4.
 
 The pipeline must deliver seven things, in order:
 
@@ -52,14 +58,14 @@ The pipeline must deliver seven things, in order:
 | D1 | **Pipeline engine = AWS CodePipeline** in account `${AWS_ACCOUNT_ID}`, region **${ECR_REGION}** (ECR repo home) | Shared account standard; keeps build + ECR + validation IAM in one account/region; no GitHub-hosted runner egress to the cluster | GitHub Actions (needs a self-hosted runner or kubeconfig secret to reach the cluster — more moving parts outside the account) |
 | D1a | **ECR auth call uses `--region ${ECR_TOKEN_REGION}`, but the repo and image live in `${ECR_REGION}`** | `aws ecr get-login-password` is only minting an auth token; the login/push registry host (`...dkr.ecr.${ECR_REGION}...`) and the repo region are `${ECR_REGION}`. The ${ECR_TOKEN_REGION} auth region is an account-specific requirement for the token mint. | Minting the token in ${ECR_REGION} — not used here per the account's auth setup |
 | D2 | **Build engine = AWS CodeBuild** with a privileged Linux GPU-less compute | CodePipeline's native build provider; supports Docker/BuildKit; can assume a role to push to ECR | In-cluster rootless BuildKit (current method) — kept as a documented fallback (§8.4), but CodeBuild gives CI isolation and logs |
-| D3 | **Image stays single-layer squashed** via `COPY --from=builder / /` | A hard-won fix (build iterations v4–v12): BuildKit's content-addressed export kept deduping the committed `libnccl.so.2` back to the stale GIN-less 2.28.9 blob. One layer = exactly one copy of every file; no lower-layer blob to resolve back to | Dockerfile-level re-pin, dedicated final layer, `--no-cache`, pin-in-torch-layer — all defeated by multi-layer export dedup |
+| D3 | **Base image stays single-layer squashed** via `COPY --from=builder / /` | A hard-won fix (build iterations v4–v12): BuildKit's content-addressed export kept deduping the committed `libnccl.so.2` back to the stale GIN-less 2.28.9 blob. One layer = exactly one copy of every file; no lower-layer blob to resolve back to. NCCL 2.31.2 is now pinned once, in the torch layer; the extra DeepEP-layer reinstall and the final re-pin layer are gone, the squash and the final `nm` gate remain. The vLLM image does not squash: its base already ships NCCL 2.31.2 and nothing on top installs another | Dockerfile-level re-pin, dedicated final layer, `--no-cache` alone — all defeated by multi-layer export dedup |
 | D4 | **Validation runs on the shared EKS cluster** (`${EKS_CLUSTER}`, p5en.48xlarge H200 nodes), triggered by CodeBuild applying k8s manifests | The collective tests need real EFA + GPUDirect hardware; CodeBuild has no GPUs. CodeBuild assumes a role, runs `kubectl apply`, waits, reads logs, gates | Running tests in CodeBuild directly (no GPUs); a separate manual step (loses the gate) |
 | D5 | **Node driver prerequisite baked into the nodegroup launch template** (`NVreg_EnableStreamMemOPs=1`, `NVreg_RegistryDwords="PeerMappingOverride=1;"`) | GDAKI (GIN GPUDirect-Async backend) registers a GPU MMIO region (`host_register_iomem`) that **requires** these NVIDIA kernel-module flags. Without them GIN fails `DevComm setup failed on all available backends` on **any** node count | Per-instance reboot (nodes get replaced by the autoscaler and come back un-flagged — a loop) |
 | D6 | **Tests = NCCL (all-reduce, all-gather, all-to-all) + DeepEP V2 + NIXL**, all **2-node / 16-rank** | NCCL proves the EFA transport end to end; DeepEP V2 proves the GIN/EFA-GDA path; NIXL proves the LIBFABRIC/EFA path. 2 nodes is the minimum that exercises **internode** RDMA | Single-node (never touches the wire); 1 collective only (misses transport-specific failures) |
 | D7 | **Runtime kernel-mode = `unordered`** via `NCCL_SYM_GIN_KERNELS_ENABLE=0` | DeepEP V2 `ordered` kernels demand GIN **strong signals + VA signals**, which aws-ofi-nccl 1.21.1 on EFA does **not** support; `unordered` needs only weak/counting signals, which EFA supports | `ordered` (fails `GIN strong signals are required, but the GIN plugin does not support them`) |
 | D8 | **Traceability = pinned ARGs + OCI labels + SBOM + git provenance** | Anyone must be able to answer "what versions produced this digest" from the image alone | Floating tags / `latest` (irreproducible) |
 | D9 | **Scanning = ECR enhanced scanning (Amazon Inspector) + Trivy in CodeBuild** | Two independent scanners; Trivy gates pre-push, Inspector gives continuous post-push coverage | One scanner only |
-| D10 | **Final output = PR to the recipe's upstream repo** (e.g. `awslabs/awsome-distributed-ai`) via `gh`, from a fork | Contributes the recipe upstream; the Dockerfile's base half is already the awslabs reference, so the delta (NIXL layering, validation manifests) is the contribution | Keeping it private (defeats the stated goal) |
+| D10 | **Final output = PR to the recipe's upstream repo** (e.g. `awslabs/awsome-distributed-ai`) via `gh`, from a fork | Contributes the recipe upstream; the Dockerfile's base half follows the awslabs reference (with a short, listed set of changes, §4), so the delta (NIXL layering, validation manifests) is the contribution | Keeping it private (defeats the stated goal) |
 | D11 | **SBOM.txt per image + AWS OSS license gate** | An SBOM is a **hard prerequisite** for publishing the image; publishing without one is not allowed. Beyond the SBOM existing, every license it lists must be on the **AWS OSS allow-list** — a disallowed/unknown license is a legal blocker, so it gates publish, not just a scan report | Publishing with no SBOM (not permitted); SBOM-without-license-check (ships a GPL/AGPL/unknown dependency unnoticed) |
 | D11a | **License gate carries scoped exceptions + verified pins, never a blanket pass** | A strict MIT/Apache/BSD list on a whole GPU container false-blocks the base OS (GPL userland + toolchain) and the NVIDIA proprietary-but-redistributable stack, and leaves source-built deps as `NOASSERTION`. The gate resolves these with two **scoped, named** exceptions (`base-os`, `nvidia-proprietary`), verified `known_licenses` pins, and `license_aliases` normalization — each narrow and auditable (§7.2) | A single broad allow-list (false-blocks every Linux image on `apt`/`gcc`); ignoring an entire layer (would wave through a genuinely bad app-layer license) |
 | D12 | **Dockerfile may live in ANY accessible git repo; a bidirectional repo↔registry pointer is mandatory** | We should not be tied to one repo. The only hard rule: the Dockerfile sits in a git repo anyone-with-access can clone, the repo README names **where the image is published**, and the ECR repo description points **back at the git repo + path**. Either half alone leaves an image or a recipe orphaned | Hardcoding `awsome-distributed-ai` as the only valid home (artificial restriction); publishing an image with no link to its source (irreproducible provenance) |
@@ -115,7 +121,7 @@ The pipeline must deliver seven things, in order:
    license. ECR enhanced scanning runs in parallel for the record.
 4. **Validate** — CodeBuild assumes a cluster-scoped IAM role, `kubectl apply`s the MPIJobs, waits for completion, parses logs, gates on all tests passing (and the §6.5 throughput floors).
 5. **Publish** — on pass, retag the **same digest** to `:validated` and
-   `:nixl1.5.0-deepepv2-efa1.50.0`, attach the SBOM, and write the
+   `:nixl1.5.0-deepepv2-efa1.51.0`, attach the SBOM, and write the
    self-documentation labels (purpose + run command, D13) and the git-source
    back-pointer (D12).
 6. **Cross-pointer (D12)** — set the ECR repo description to point at the git
@@ -127,19 +133,43 @@ The pipeline must deliver seven things, in order:
 
 ## 4. The Dockerfile as a template
 
-The Dockerfile is written so others can **lift one integration section** for their
-own image. It is a **two-stage** build (`builder` → squashed `final`), both
+The base `Dockerfile` is written so others can **lift one integration section** for
+their own image. It is a **two-stage** build (`builder` → squashed `final`), both
 `FROM nvidia/cuda:13.0.2-devel-ubuntu22.04`. Sections, top to bottom:
 
 | Section | What it does | Reuse note |
 |---|---|---|
 | **Base + ARGs** | CUDA 13.0.2 devel, all versions as `ARG`s | Change `TORCH_CUDA_ARCH_LIST` / `NVCC_GENCODE` for a different GPU arch |
-| **① awslabs base (verbatim)** | EFA installer 1.50.0, GDRCopy, GIN NCCL 2.31.2, torch 2.11.0+cu130, DeepEP V2 | This half is the upstream reference; keep it intact to stay in sync |
-| **② UCX (for NIXL)** | UCX 1.23.x with CUDA + GDRCopy + verbs | Only needed if you want NIXL's UCX backend |
-| **③ NIXL v1.5.0** | meson/ninja build, `enable_plugins=UCX,LIBFABRIC,POSIX`, points at the EFA libfabric | The NIXL+EFA integration template; `enable_plugins` ERRORS loudly if LIBFABRIC can't be found |
-| **④ GIN NCCL re-pin + binary self-test** | Re-asserts NCCL 2.31.2 and proves the `.so` exports `ncclCommQueryProperties` | Guards against the dedup trap (D3) |
-| **⑤ Squash stage** | `COPY --from=builder / /` into fresh CUDA base | The single-layer fix (D3) |
-| **⑥ Runtime ENV + final gate** | `FI_PROVIDER=efa`, `NCCL_GIN_TYPE=5`, absolute `NCCL_NET_PLUGIN`, `ldconfig` for gdrcopy; final import + binary gate | The "works with zero per-run env" contract |
+| **① awslabs base** | EFA installer 1.51.0 (sha256-checked), GDRCopy v2.5.2, torch 2.11.0+cu130 with GIN NCCL 2.31.2 pinned in the same layer, DeepEP V2 at `d75f22a5` | Follows `reference/deepep.Dockerfile` (vendored unchanged). Changes from it: EFA 1.51.0 + sha256, DeepEP pinned to a commit, NCCL pinned once in the torch layer, `debhelper`/`devscripts` dropped |
+| **② nccl-tests** | MPI-enabled `all_reduce/all_gather/alltoall` perf tests against the GIN NCCL | NCCL EFA transport benchmarks |
+| **③ NIXL v1.5.0** | meson/ninja build, `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; no UCX build, no `nixl_ep`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` | The NIXL+EFA integration template; `enable_plugins` errors if LIBFABRIC can't be built, and the step fails if a UCX plugin appears |
+| **④ Squash stage** | `COPY --from=builder / /` into fresh CUDA base | The single-layer fix (D3) |
+| **⑤ Runtime ENV + final gate** | `FI_PROVIDER=efa`, `NCCL_GIN_TYPE=5`, absolute `NCCL_NET_PLUGIN`, `ldconfig` for gdrcopy; final `nm` + plugin + NIXL test + import gate | The "works with zero per-run env" contract |
+
+The separate "GIN NCCL re-pin" layer and the UCX section of earlier versions are gone.
+
+Shipped NIXL tests (`/opt/nixl-tests`): `libfabric_topology_test`,
+`rail_active_refcount_test`, `desc_example`, `p2p_test`, `serdes_test`,
+`telemetry_reader`, plus the `*-topo.xml` files `libfabric_topology_test` reads.
+Not shipped, because each hard-codes the UCX backend: `nixl_test`, `agent_example`,
+`nixl_example`, and NIXL EP (`nixl_ep`).
+
+**`Dockerfile.vllm`** starts `FROM vllm/vllm-openai:v0.33.0-x86_64-efa@sha256:5fc20aa1…`.
+That base already has vLLM 0.33.0, torch 2.14.0+cu130, Python 3.12, NCCL 2.31.2 (GIN),
+EFA 1.51.0 (libfabric 2.7.0, aws-ofi-nccl 1.22.0, `NCCL_NET_PLUGIN=ofi`), GDRCopy 2.5.1,
+the NIXL 1.5.0 wheel (`nixl-cu13`, LIBFABRIC plugin linked to the EFA libfabric),
+Mooncake EFA 0.3.13.post1, LMCache 0.5.6, FlashInfer 0.7.2.post1 and DeepEP 2.1.0+874779c
+(sm_90a/100a/103a). It has no OpenMPI and no nccl-tests. On top, `Dockerfile.vllm` adds:
+
+| Addition | Why |
+|---|---|
+| DeepEP V2 rebuilt at `d75f22a5` for sm_90/100/103/120 | 9 EFA fixes newer than `874779c` (GIN flush before exit, `gin.flush` timeout, proxy ring wait, hybrid dispatch races) and sm_120 for g7e |
+| NIXL LIBFABRIC tests in `/opt/nixl-tests`, run via `nixl-test <name>` | Same six tests, built in a discarded stage. `/opt/nixl` stays off the global loader path, so vLLM keeps the wheel's libnixl |
+| `ENV FI_PROVIDER=efa NCCL_GIN_TYPE=5` | DeepEP V2 EFA-GDA runtime selection |
+| Build gates | vLLM/torch/NCCL unchanged, GIN symbol, aws-ofi-nccl plugins in the loader cache, GDRCopy, wheel LIBFABRIC plugin → EFA libfabric, NIXL tests resolve and `serdes_test` runs, DeepEP SASS per arch |
+
+`vllm-requirements.txt`, `flashinfer-kernels.txt` and `deadsnakes.asc` are no longer
+used by either Dockerfile. They stay in the directory.
 
 ### 4.1 Integration contracts worth copying
 
@@ -159,18 +189,19 @@ own image. It is a **two-stage** build (`builder` → squashed `final`), both
 ### 4.2 Build defects found and fixed (the six fixes)
 
 The first working image took several build iterations; each fix pushed the
-failure later. All six are baked into the current Dockerfile, so a fresh
-`--no-cache` build reproduces a clean image. They are listed here because every
-one is a trap a derived recipe will hit again.
+failure later. They are listed here because every one is a trap a derived recipe
+will hit again. Rows 3, 5 and 6 were found through `nixl_test`, which is no longer
+built or shipped (it hard-codes UCX). Their symptom column is history; the fix in
+each row is still in the Dockerfile and still needed by the shipped LIBFABRIC tests.
 
 | # | Symptom | Root cause | Fix (in the Dockerfile) |
 |---|---|---|---|
 | 1 | `ld: cannot find -lnccl` while building nccl-tests | The GIN NCCL is installed as `libnccl.so.2` only; the linker needs the dev symlink `libnccl.so` | `ln -sf libnccl.so.2 "$NCCL_LIB/libnccl.so"` before `make` |
-| 2 | NIXL meson error on the CUDA arch list | `-Dnixl_cuda_arch_list` wants a **comma**-separated list; a semicolon list is mis-parsed | pass `-Dnixl_cuda_arch_list="90,100,103"` (commas), not `"9.0;10.0;10.3"` |
-| 3 | `nixl_test` binary never built | NIXL skips the whole `test/` subdir when meson `buildtype=release` (the default) | `meson setup … --buildtype=debugoptimized` so the test subdir builds |
+| 2 | NIXL meson error on the CUDA arch list | `-Dnixl_cuda_arch_list` wants a **comma**-separated list; a semicolon list is mis-parsed | pass `-Dnixl_cuda_arch_list="90,100,103,120"` (commas), not `"9.0;10.0;10.3;12.0"` |
+| 3 | (obsolete symptom) `nixl_test` binary never built | NIXL skips the whole `test/` subdir when meson `buildtype=release` (the default) | `meson setup … --buildtype=debugoptimized` so the test subdir builds. Still needed: the shipped tests in `/opt/nixl-tests` come from the same subdir |
 | 4 | libfabric utils fail to compile under `-O2` | `-O2` inlining makes GCC raise a **false-positive** `-Wmaybe-uninitialized` inside the EFA SDK header `fi_domain.h` (`fi_mr_reg`); NIXL's default `werror=true` makes it fatal | `meson setup … -Dwerror=false` |
-| 5 | `nixl_test` segfaults at startup: `createBackend('UCX')` fails | Baked `NIXL_PLUGIN_DIR` was a **colon-joined** candidate list; NIXL `opendir()`s the value literally (does not split on `:`), so the open fails | set `NIXL_PLUGIN_DIR` to the **single** real dir `${NIXL_PREFIX}/lib/x86_64-linux-gnu/plugins` |
-| 6 | `nixl_test` can't start: `libserdes.so: cannot open shared object file` | NIXL installs its libs into the multiarch subdir `${NIXL_PREFIX}/lib/x86_64-linux-gnu`, which was **not** on `LD_LIBRARY_PATH` | prepend that subdir to `LD_LIBRARY_PATH` |
+| 5 | (obsolete symptom) `nixl_test` segfaults at startup: `createBackend('UCX')` fails | Baked `NIXL_PLUGIN_DIR` was a **colon-joined** candidate list; NIXL `opendir()`s the value literally (does not split on `:`), so the open fails | set `NIXL_PLUGIN_DIR` to the **single** real dir `${NIXL_PREFIX}/lib/x86_64-linux-gnu/plugins`. Still applies to `createBackend('LIBFABRIC')` |
+| 6 | (obsolete symptom) `nixl_test` can't start: `libserdes.so: cannot open shared object file` | NIXL installs its libs into the multiarch subdir `${NIXL_PREFIX}/lib/x86_64-linux-gnu`, which was **not** on `LD_LIBRARY_PATH` | prepend that subdir to `LD_LIBRARY_PATH` (base image) or set it per test via the `nixl-test` wrapper (vLLM image) |
 
 Two process rules learned alongside the fixes, both now standing practice:
 - **Verify the pushed image by immutable `@digest` with `imagePullPolicy: Always`.**
@@ -186,39 +217,58 @@ Two process rules learned alongside the fixes, both now standing practice:
 ## 5. Build arguments (traceability matrix)
 
 Every version is a pinned `ARG`. These, plus the git SHA of the build context,
-fully determine the image.
+determine the image.
+
+Base `Dockerfile`:
 
 | ARG | Value | Role |
 |---|---|---|
 | `CUDA_VERSION` | `13.0.2` | base image `nvidia/cuda:13.0.2-devel-ubuntu22.04` |
-| `EFA_INSTALLER_VERSION` | `1.50.0` | EFA userspace + aws-ofi-nccl GIN plugin + libfabric `>=2.6` |
-| `NCCL_VERSION` | `2.31.2` | GIN-capable NCCL (exports `ncclCommQueryProperties`) |
+| `EFA_INSTALLER_VERSION` / `EFA_INSTALLER_SHA256` | `1.51.0` / `83993044…` | EFA userspace + aws-ofi-nccl GIN plugin + libfabric; tarball sha256-checked |
+| `NCCL_VERSION` | `2.31.2` | GIN-capable NCCL (exports `ncclCommQueryProperties`), pinned once in the torch layer |
 | `GDRCOPY_VERSION` | `v2.5.2` | GPUDirect RDMA copy |
-| `DEEPEP_REF` | `main` (`amazon-contributing/DeepEP`) | DeepEP V2 source |
-| `NIXL_REF` | `v1.5.0` (= commit `1683cf3`, 2026-09-30) | NIXL source |
-| `UCX_VERSION` | `v1.23.x` | NIXL UCX backend |
+| `DEEPEP_REF` | `d75f22a5e07c95eb0bae94ad6445a5009c06c886` (`amazon-contributing/DeepEP`) | DeepEP V2 source, by commit |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b…` (2026-09-30) | NIXL source; tag asserted to equal the commit |
 | `TORCH_VERSION` | `2.11.0` (`cu130`) | PyTorch |
 | `PYTHON_VERSION` | `3.10` | interpreter |
-| `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3` | Hopper (H100/H200) + Blackwell (B200/B300) + Grace-Blackwell (GB200/GB300) |
-| `NVCC_GENCODE` | `...compute_90,sm_90 ...compute_100,sm_100 ...compute_103,sm_103` | multi-arch codegen (sm_100=GB200, sm_103=B300/GB300) |
-| `NCCL_REPIN_BUST` | `v12` | cache-bust token for the final re-pin layer |
+| `NCCL_TESTS_REF` | `master` | nccl-tests (not pinned) |
+| `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | Hopper + Blackwell + Grace-Blackwell + RTX PRO 6000 (g7e) |
+| `NVCC_GENCODE` | `...sm_90 ...sm_100 ...sm_103 ...sm_120` | multi-arch codegen |
 
-**Image labels** (queryable from the image alone):
+`UCX_VERSION` and `NCCL_REPIN_BUST` no longer exist.
+
+`Dockerfile.vllm`:
+
+| ARG | Value | Role |
+|---|---|---|
+| `BASE_IMAGE` | `vllm/vllm-openai@sha256:5fc20aa179d3f7f83aa4a8b66473edf80582d865c62b630e49a207c76b9a0886` (`v0.33.0-x86_64-efa`) | base, by digest |
+| `DEEPEP_REF` | `d75f22a5…` | DeepEP V2 rebuild |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b…` | NIXL LIBFABRIC tests |
+| `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | DeepEP + NIXL tests |
+| `VLLM_VERSION` / `TORCH_VERSION` / `NCCL_VERSION` | `0.33.0` / `2.14.0` / `2.31.2` | asserted unchanged from the base |
+| `build-requirements.txt` | `--require-hashes` | meson/ninja/pybind11 for the NIXL test stage |
+
+**Image labels** (base `Dockerfile`, queryable from the image alone):
 ```
-org.opencontainers.image.description = DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA installer 1.50.0, multi-arch sm_90/sm_100/sm_103 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300)
+org.opencontainers.image.description = DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (...)
 nixl.ref        = v1.5.0
-deepep.ref      = amazon-contributing/DeepEP@main
-efa.installer   = 1.50.0
+deepep.ref      = amazon-contributing/DeepEP@d75f22a5e07c95eb0bae94ad6445a5009c06c886
+efa.installer   = 1.51.0
 ```
+`Dockerfile.vllm` adds `vllm.version`, `torch.version` and `base.image` (the digest above).
 Add in CI: `org.opencontainers.image.revision=<gitsha>`,
 `org.opencontainers.image.source=<repo url>`,
 `org.opencontainers.image.created=<timestamp>`.
 
-**Published image (current, ${AWS_REGION}):**
+**Published image (${AWS_REGION}):**
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.50.0
+${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.51.0
 @${IMAGE_DIGEST}
 ```
+Images from this branch: **pending pipeline run** (no digest yet). Last validated
+images, from the previous Dockerfiles (EFA 1.50.0, NIXL with UCX):
+base `091ce165` (commit `020e077`, ~10.2 GiB) and vLLM `eeaa6801` (commit `12a6ae6`,
+~10.8 GiB). Both are history and do not match the current Dockerfiles.
 The pipeline (D1) publishes to **${ECR_REGION}** ECR, repo
 `${PUBLISH_REPO}` (to be created — the pipeline's publish
 stage creates it on first run if absent). Note the auth split (D1a): the login
@@ -234,8 +284,9 @@ p5en.48xlarge node), pinned to driver-flagged nodes. Each is gated: a non-zero
 exit or a missing success marker fails the pipeline.
 
 ### 6.1 NCCL collectives (EFA transport)
-`nccl-tests` is built into the image (builder stage, against the GIN NCCL +
-EFA/OMPI stack) and placed on `PATH`. Run all-reduce, all-gather, all-to-all:
+`nccl-tests` is built into the base image (builder stage, against the GIN NCCL +
+EFA/OMPI stack) and placed on `PATH`. The vLLM image has neither nccl-tests nor
+OpenMPI. Run all-reduce, all-gather, all-to-all:
 ```
 mpirun -np 16 -N 8 --bind-to none \
   -x NCCL_DEBUG=INFO -x NCCL_NET_PLUGIN=ofi -x NCCL_TUNER_PLUGIN=ofi \
@@ -261,17 +312,29 @@ no `GIN strong signals are required`, dispatch + combine complete on all 16 rank
 (~82 GB/s wire), combine ~200–250 GB/s bus BW. Nodes **must** carry the GDAKI
 driver flags (D5).
 
-### 6.3 NIXL (LIBFABRIC / EFA) — `test/nixl_test.cpp` only
-The single tested NIXL use case is `test/nixl_test.cpp` (the single/multi-node
-nixlAgent API test, meson target `nixl_test`). It is built with NIXL and
-preserved at `/opt/nixl-tests/nixl_test`. Run one process per node over the
-LIBFABRIC backend:
+### 6.3 NIXL over LIBFABRIC / EFA (`nixl_lf`)
+The NIXL suite is `nixl_lf`: `benchmarks/nixl/nixl-lf-target-validate.yaml` and
+`benchmarks/nixl/nixl-lf-initiator-validate.yaml`, which run
+`benchmarks/nixl/nixl_lf_test.py` through `nixl-lf-run.sh` (both from a ConfigMap).
+It creates only the LIBFABRIC backend and reads 1 GiB GPU-to-GPU from the target
+pod, 5 transfers per run, 3 runs (`NIXL_ITERS="1 2 3"`), 1 GPU by default:
 ```
-# node B (target), then node A (initiator) — see --help for role/peer flags
-NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins /opt/nixl-tests/nixl_test
+kubectl -n ${K8S_NAMESPACE} create configmap nixl-lf-scripts \
+  --from-file=benchmarks/nixl/nixl-lf-run.sh --from-file=benchmarks/nixl/nixl_lf_test.py
+envsubst < benchmarks/nixl/nixl-lf-target-validate.yaml | kubectl apply -f -      # NODE_1
+export NIXL_TARGET_IP=$(kubectl -n ${K8S_NAMESPACE} get pod nixl-lf-target -o jsonpath='{.status.podIP}')
+envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f -   # NODE_0
 ```
-**Gate:** LIBFABRIC backend selected (not UCX-only / not SHM), transfer
-completes across the 2 nodes, exit 0.
+**Gate:** `NIXL backends created: ['LIBFABRIC']` and `LIBFABRIC backend selected`,
+`verify=OK` on 5/5 transfers per run, `NIXL_LF_RESULT PASS` and rc=0 on both pods,
+EFA `rdma_read_bytes` rising by 5 GiB per run, and mean GB/s at or above the floor
+(§6.5).
+
+This replaces NIXL's own `nixl_test` (`test/nixl_test.cpp`), which hard-codes
+`createBackend("UCX")` and so never tested LIBFABRIC over EFA. `nixl_test` is no
+longer built, and the four `benchmarks/nixl/nixl-test-*.yaml` manifests are deleted.
+The NIXL C++ tests that do ship (`/opt/nixl-tests`, §4) are not part of the gate;
+`serdes_test` runs as a build gate.
 
 ### 6.4 Test harness notes
 - Rendezvous: headless Service with `publishNotReadyAddresses: true` + per-pod
@@ -294,15 +357,18 @@ at or above its floor:
 | NCCL all_to_all busbw @8G | 83.5 | 81.0 | −3% |
 | DeepEP dispatch bus BW | 267.0 | 259.0 | −3% |
 | DeepEP combine bus BW | 187.0 | 177.6 | **−5%** |
-| nixl_test | PASS | PASS | functional, no tolerance |
+| nixl_lf (1 GPU READ, 1 GiB) mean GB/s | 47.2 | 45.8 | −3%, plus PASS on all 3 runs |
+
+The nixl_lf baseline is from image `eeaa6801`, 2 x p5en, 2026-11-03 (47.23 / 47.26 /
+47.22). Context, not gated: 8 GPUs give 382.5 GB/s READ and 382.2 GB/s WRITE (sum).
 
 **Why combine is −5%:** DeepEP combine's measured run-to-run spread is ~6% (a
 rendezvous-role-tied per-node asymmetry — worker-0 ranks run faster than
 worker-1), wider than the −3% band used for the tighter metrics, so a clean
 image would occasionally dip under −3% on a single 3-run mean. The looser floor
 catches a real regression without false-blocking on intrinsic variance.
-**Gate rule:** sign off only if every metric clears its floor AND nixl_test
-passes 3/3; otherwise BLOCK publish.
+**Gate rule:** sign off only if every metric clears its floor AND nixl_lf
+passes 3/3 at or above its floor; otherwise BLOCK publish.
 
 ## 7. SBOM, licenses, and image self-documentation
 
@@ -325,7 +391,7 @@ syft "$IMG" --override-default-catalogers "$CATS" -o syft-table > SBOM.txt
 ```
 
 `SBOM.txt` lists every OS package, Python wheel, and vendored library (CUDA,
-EFA, GIN NCCL, DeepEP, NIXL, UCX, torch) with its **version and license**. It is:
+EFA, GIN NCCL, DeepEP, NIXL, torch) with its **version and license**. It is:
 - attached to the ECR image (OCI referrer / `aws ecr put-image` referrer, or at
   minimum published next to the image in the repo README),
 - committed into the git recipe repo under the recipe path, and
@@ -369,7 +435,7 @@ Rules:
 | Helper | Key | What it does |
 |---|---|---|
 | scan scope | `scan_scope.include_types: [deb, pypi]` | Only OS (dpkg) + pip packages are gated. The `go-module`/`binary` catalogers find Go vendored inside baked tools (kubectl, the EFA installer) — not shipped deps — so they are out of scope. Matches the `--override-default-catalogers` flag on the scan. |
-| known-license pins | `known_licenses` | Source-built components (`nixl`, `deep_ep`, `nccl`, `ucx`, `torch`, `triton`, `gdrcopy`) carry no scanner-readable metadata (installed by `git clone && make`), so their SBOM license is `NOASSERTION`. Each is pinned to its upstream license, verified against the repo's LICENSE file. A pin overrides the missing value, then the pinned license is still checked against the allow-list. Common PyPI wheels syft reads as `NOASSERTION` are pinned the same way. |
+| known-license pins | `known_licenses` | Source-built components (`nixl`, `deep_ep`, `nccl`, `torch`, `triton`, `gdrcopy`) carry no scanner-readable metadata (installed by `git clone && make`), so their SBOM license is `NOASSERTION`. Each is pinned to its upstream license, verified against the repo's LICENSE file. A pin overrides the missing value, then the pinned license is still checked against the allow-list. Common PyPI wheels syft reads as `NOASSERTION` are pinned the same way. |
 | license aliases | `license_aliases` | Free-text strings pip wheels emit (`"Apache License 2.0"`, `"ASL 2"`, `"LGPLv3"`, `"NVIDIA Proprietary Software"`) are normalized to SPDX ids before the check, so a permissive wheel passes and a copyleft one still blocks. |
 
 **Two standing exceptions (D11a).** A strict MIT/Apache/BSD list applied to a
@@ -402,7 +468,7 @@ places carry the "what + how", and they must agree:
 
 **(a) OCI labels baked at build time:**
 ```dockerfile
-LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC+UCX) on CUDA 13.0.2, EFA 1.50.0, multi-arch sm_90/sm_100/sm_103"
+LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120"
 LABEL org.opencontainers.image.source="https://github.com/<org>/<repo>/tree/<path>"   # back-pointer to the git recipe (D12)
 LABEL run.purpose="2-node GPU-collective benchmarking: NCCL (ar/ag/a2a), DeepEP V2 MoE dispatch/combine, NIXL transfer, over EFA"
 LABEL run.command="mpirun -np 16 -N 8 --bind-to none all_reduce_perf -b 8 -e 8G -f 2 -g 1   # see repo README for DeepEP / NIXL invocations"
@@ -423,7 +489,7 @@ specific repo, is what matters. The one hard requirement is a **two-way link**:
 
 | Direction | Where | What it says |
 |---|---|---|
-| git repo → registry | recipe repo README | the published image URI(s), e.g. `${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.50.0`, and that `:validated` tracks the latest signed-off digest |
+| git repo → registry | recipe repo README | the published image URI(s), e.g. `${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.51.0`, and that `:validated` tracks the latest signed-off digest |
 | registry → git repo | ECR repo description + the `org.opencontainers.image.source` label | the git repo URL + path the image was built from |
 
 Set the ECR repo description back-pointer at publish time:
@@ -458,8 +524,9 @@ DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
   --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103" \
   -t <registry>/nixl-deepep-efa:dev .
 ```
-The in-build self-tests (steps ④ and ⑥) fail the build if the GIN NCCL `.so`
-is stale or a backend plugin is missing — a green build is already partly validated.
+The in-build self-tests (the torch-layer `nm` check in ① and the final gate in ⑤)
+fail the build if the GIN NCCL `.so` is stale, the LIBFABRIC plugin is missing, a
+UCX plugin appears, or a NIXL test does not resolve — a green build is already partly validated.
 
 ### 8.2 Build in CI (CodeBuild + BuildKit → ECR)
 `buildspec.yml` (sketch):
@@ -517,10 +584,10 @@ initramfs — `dracut --force` / `update-initramfs -u` — not just drop the fil
 ### 8.4 Validate on the cluster
 Apply the test manifests (§6) and gate on their results:
 ```bash
-kubectl apply -f tests/nccl-collectives-mpijob.yaml      # ar / ag / a2a
-kubectl apply -f tests/deepep-v2-internode-mpijob.yaml   # GIN / EFA-GDA
-kubectl apply -f tests/nixl-libfabric-mpijob.yaml        # LIBFABRIC / EFA
-# wait for each launcher Completed, parse logs for the success markers in §6
+envsubst < benchmarks/nccl/nccl-tests-validate.yaml | kubectl apply -f -   # ar / ag / a2a
+envsubst < benchmarks/deepep/deepep-validate.yaml   | kubectl apply -f -   # GIN / EFA-GDA
+# NIXL: the nixl-lf target + initiator pods, in order (see §6.3)       # LIBFABRIC / EFA
+# wait for each launcher / pod Completed, parse logs for the success markers in §6
 ```
 > **In-cluster BuildKit fallback:** if CodeBuild cannot be used, the original
 > `build-pod.yaml` (rootless `moby/buildkit:v0.17.3-rootless`, context from a
@@ -537,7 +604,7 @@ MANIFEST=$(aws ecr batch-get-image --repository-name ${PUBLISH_REPO} \
   --image-ids imageTag=candidate-$GITSHA --region ${ECR_REGION} \
   --profile ${AWS_PROFILE} --query 'images[0].imageManifest' --output text)
 aws ecr put-image --repository-name ${PUBLISH_REPO} \
-  --image-tag nixl1.5.0-deepepv2-efa1.50.0 --image-manifest "$MANIFEST" \
+  --image-tag nixl1.5.0-deepepv2-efa1.51.0 --image-manifest "$MANIFEST" \
   --region ${ECR_REGION} --profile ${AWS_PROFILE}
 # registry → git repo back-pointer + purpose/run (D12, D13)
 aws ecr put-repository-catalog-data \
@@ -617,8 +684,12 @@ SBOM/license/self-doc) is identical regardless of where the repo is hosted.
 4. **nccl-tests + NIXL test are in the image.** nccl-tests
    (`all_reduce_perf`/`all_gather_perf`/`alltoall_perf`) is built in the builder
    stage against the GIN NCCL + EFA/OMPI stack and placed on `PATH`. The NIXL
-   test is **only** `test/nixl_test.cpp` → the `nixl_test` binary, preserved at
-   `/opt/nixl-tests/nixl_test`. Both are asserted present in the final gate.
+   tests are the LIBFABRIC and backend-free C++ tests in `/opt/nixl-tests`
+   (`libfabric_topology_test`, `rail_active_refcount_test`, `desc_example`,
+   `p2p_test`, `serdes_test`, `telemetry_reader`); the final gate checks each one
+   resolves and runs `serdes_test`. `nixl_test` is no longer built (it hard-codes
+   UCX). The vLLM image has no nccl-tests and no OpenMPI; it carries the same NIXL
+   tests, run via `nixl-test <name>`. The NIXL validation suite is `nixl_lf` (§6.3).
 
 ---
 
