@@ -60,21 +60,32 @@ suites:
       dispatch_wire: 82.0
       combine_wire: 57.0
 
-  nixl_test:
-    kind: functional         # pass/fail, not a bandwidth number
-    unit: boolean
-    # the -3% tolerance does not apply to a functional test
+  # NIXL over EFA: benchmarks/nixl/nixl-lf-*-validate.yaml (nixl_lf_test.py). ONLY the
+  # LIBFABRIC backend is created -- EFA does not support UCX. Defaults: 1 GPU, READ,
+  # 1 GiB per transfer, 5 transfers per run, 3 runs (NIXL_ITERS="1 2 3").
+  # Replaces NIXL's own nixl_test, which hard-codes the UCX backend.
+  nixl_lf:
+    kind: functional+throughput
+    unit: GB/s               # NIXL_LF_RESULT mean_GBps, one GPU
     baseline:
-      result: PASS           # buffers match, transfer success, rc=0, both pods
+      result: PASS
+      mean_GBps: 47.2        # image eeaa6801, 2 x p5en, 2026-11-03 (47.23 / 47.26 / 47.22)
+    floor:
+      mean_GBps: 45.8        # -3%
     pass_requires:
-      - "Transfer completed and Buffers match with Initiator"
-      - "exit code 0 on both target and initiator"
+      - "NIXL backends created: ['LIBFABRIC'] and LIBFABRIC backend selected"
+      - "verify=OK on every transfer (5/5 per run)"
+      - "NIXL_LF_RESULT PASS; NIXL_LF_RUN_DONE ... rc=0 on both pods"
+      - "EFA rdma_read_bytes rises by 5 GiB per run (EFA_COUNTERS lines)"
+    context:                 # not gated; NIXL_GPUS="0 1 2 3 4 5 6 7", --iters 20
+      g8_read_sum_GBps: 382.5
+      g8_write_sum_GBps: 382.2
 
 verdict_rule: >
   SIGN OFF (allow publish) only if every throughput metric's 3-run mean is at or
-  above its own floor (default -3%; DeepEP combine_bus -5%) AND nixl_test passes
-  all 3 runs. Otherwise BLOCK publication and report which metric regressed and
-  by how much.
+  above its own floor (default -3%; DeepEP combine_bus -5%) AND nixl_lf passes
+  all 3 runs at or above its floor. Otherwise BLOCK publication and report which
+  metric regressed and by how much.
 
 # ---------------------------------------------------------------------------
 # LICENSE GATE policy (read by check_licenses.py).
@@ -386,7 +397,7 @@ measured:
     # dedicated -5% band accounts for combine's ~6% measured spread.
     # dispatch (the tighter, GIN-RDMA-bound half of EP) is exactly on baseline.
 
-  nixl_test:
+  nixl_test:                 # historical (image fb17de70); replaced by nixl_lf above
     iters: [PASS, PASS, PASS]
     result: PASS
     pass: true

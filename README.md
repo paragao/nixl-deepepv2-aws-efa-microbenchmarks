@@ -125,9 +125,11 @@ export NIXL_TARGET_IP=$(kubectl -n ${K8S_NAMESPACE} get pod nixl-lf-target -o js
 envsubst < benchmarks/nixl/nixl-lf-initiator-validate.yaml | kubectl apply -f -   # then initiator (NODE_0)
 ```
 
-`benchmarks/nixl/nixl-test-*-validate.yaml` run NIXL's own `nixl_test` (`test/nixl_test.cpp`).
-It hard-codes `createBackend("UCX")`, so it only proves the UCX path, not LIBFABRIC over EFA.
-Keep it as a UCX smoke test; the gate counts the `nixl-lf-*` test above.
+Every NIXL path in this repo uses the LIBFABRIC backend only: EFA does not support UCX.
+The images build NIXL without UCX, so NIXL's own `nixl_test` (which hard-codes
+`createBackend("UCX")`) is no longer shipped and its manifests are gone. The images carry
+NIXL's LIBFABRIC and backend-free C++ tests in `/opt/nixl-tests` (in the vLLM image, run them
+as `nixl-test <name>`), for example `libfabric_topology_test` to print the EFA rail layout.
 
 #### NIXL test knobs (network load)
 
