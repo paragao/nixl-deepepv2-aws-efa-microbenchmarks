@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# vLLM v0.33.0 + DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.0 (LIBFABRIC over EFA) image.
+# vLLM v0.33.0 + DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.2 (LIBFABRIC over EFA) image.
 #
 # Built ON TOP of vLLM's own AWS EFA image, vllm/vllm-openai:v0.33.0-x86_64-efa
 # (vLLM's docker/Dockerfile.efa). That image already carries, and this file does NOT
@@ -15,11 +15,15 @@
 #   - Mooncake (EFA wheel), LMCache, DeepEP V2 2.1.0+874779c
 #
 # This file adds only what that image lacks:
+#   0. NIXL 1.5.2 wheels in place of 1.5.0. On libfabric 2.7 (EFA 1.51) NIXL 1.5.0 WRITE
+#      fails: an unlocked endpoint race (ai-dynamo/nixl#2308) and unsolicited write recv
+#      left on by the wheel (#2494). 1.5.2 carries both fixes. Seen as GPU-0 aborts in the
+#      8-GPU WRITE test and a dead decode engine in vLLM 1P1D on the 1.5.0 wheel.
 #   1. DeepEP V2 rebuilt at amazon-contributing/DeepEP d75f22a5 (9 EFA fixes newer than
 #      the base's 874779c: GIN flush before exit, gin.flush timeout, proxy ring wait,
 #      hybrid dispatch races) and for sm_120 (g7e) too; the base builds sm_90a/100a/103a.
 #   2. NIXL's C++ test binaries (LIBFABRIC only; no UCX) under /opt/nixl-tests, built
-#      from the same NIXL v1.5.0 commit in a throw-away stage. Run them through
+#      from the same NIXL v1.5.2 commit in a throw-away stage. Run them through
 #      `nixl-test <binary>`, which points them at /opt/nixl; vLLM keeps using the wheel.
 #   3. The DeepEP V2 EFA-GDA runtime selection (NCCL_GIN_TYPE=5, FI_PROVIDER=efa).
 #   4. Build gates: NCCL GIN symbol, NCCL plugins, GDRCopy, LIBFABRIC -> EFA libfabric,
@@ -42,9 +46,13 @@ ARG BASE_IMAGE=docker.io/vllm/vllm-openai@sha256:5fc20aa179d3f7f83aa4a8b66473edf
 #   9.0 = H100/H200, 10.0 = B200/B300/GB200, 10.3 = B300/GB300, 12.0 = RTX PRO 6000 (g7e)
 ARG TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0"
 
-# NIXL v1.5.0 = 1683cf3 -- the version of the base's nixl-cu13 wheel.
-ARG NIXL_REF="v1.5.0"
-ARG NIXL_COMMIT=1683cf3b7f3d11674c03c5e861cea22339876c96
+# NIXL v1.5.2 = e72c52c (2026-10-28). The test stage builds this commit; the final stage
+# swaps the base's 1.5.0 wheels for the 1.5.2 wheels below (PyPI, sha256-pinned).
+ARG NIXL_VERSION=1.5.2
+ARG NIXL_CU13_WHEEL_SHA256=591eda3f14b72769590cd71b6b46fc5e483ef1b5a90a29a8ff464310c9cf6af2
+ARG NIXL_META_WHEEL_SHA256=e4ef5e16f60be11622030e23333387bd73101102fc9f62efa1c99021d51550a6
+ARG NIXL_REF="v1.5.2"
+ARG NIXL_COMMIT=e72c52c78478d2e1ca9e9c57b872114e113ad767
 
 # DeepEP V2 (amazon-contributing fork; setup_deepep_gin.sh clones only that repo).
 ARG DEEPEP_REF=d75f22a5e07c95eb0bae94ad6445a5009c06c886
@@ -55,7 +63,7 @@ ARG TORCH_VERSION=2.14.0
 ARG NCCL_VERSION=2.31.2
 
 # ===========================================================================
-# Stage 1 (discarded): NIXL v1.5.0 C++ tests, LIBFABRIC plugin only.
+# Stage 1 (discarded): NIXL v1.5.2 C++ tests, LIBFABRIC plugin only.
 # ===========================================================================
 FROM ${BASE_IMAGE} AS nixl-tests-build
 ARG NIXL_REF
@@ -138,6 +146,25 @@ RUN printf '%s\n' '#!/bin/sh' \
         > /usr/local/bin/nixl-test \
     && chmod 755 /usr/local/bin/nixl-test
 
+# --- NIXL 1.5.2 wheels for vLLM ---------------------------------------------------
+# Replace the base's nixl-cu13 / nixl 1.5.0 with 1.5.2 (see item 0 in the header).
+# --no-deps: their only deps are torch and numpy, already pinned by the base.
+# vLLM 0.33.0's kv_connectors.txt names nixl==1.5.0; that pin is install-time only, and
+# 1.5.2 is a patch release of the same API.
+ARG NIXL_VERSION
+ARG NIXL_CU13_WHEEL_SHA256
+ARG NIXL_META_WHEEL_SHA256
+RUN set -e; \
+    printf '%s\n' \
+        "nixl-cu13==${NIXL_VERSION} --hash=sha256:${NIXL_CU13_WHEEL_SHA256}" \
+        "nixl==${NIXL_VERSION} --hash=sha256:${NIXL_META_WHEEL_SHA256}" > /tmp/nixl-req.txt; \
+    pip3 install --no-deps --no-cache-dir --require-hashes --index-url https://pypi.org/simple \
+        -r /tmp/nixl-req.txt; \
+    rm -f /tmp/nixl-req.txt; \
+    python3 -c "import sys; from importlib.metadata import version as v; \
+c, m = v('nixl-cu13'), v('nixl'); print('nixl-cu13', c, '| nixl', m); \
+sys.exit(0 if c == m == '${NIXL_VERSION}' else (print('FATAL: NIXL wheels not ${NIXL_VERSION}') or 1))"
+
 # --- DeepEP V2 at the EFA-fixed pin -----------------------------------------------
 # The base already has nvcc, git and the CUDA dev headers DeepEP needs (vLLM's
 # Dockerfile.efa installs them). The runtime base sets no LIBRARY_PATH, so add the CUDA
@@ -158,10 +185,14 @@ RUN --mount=type=bind,source=setup_deepep_gin.sh,target=/tmp/setup_deepep_gin.sh
 # --- Runtime selection --------------------------------------------------------------
 # DeepEP V2 EFA-GDA = NCCL GIN type 5 over the EFA libfabric provider. The base already
 # sets NCCL_NET_PLUGIN=ofi / NCCL_TUNER_PLUGIN=ofi (resolved via ld.so.conf.d).
+# FI_EFA_USE_UNSOLICITED_WRITE_RECV=0: libfabric >= 2.0 turns unsolicited write recv on by
+# default, and it can lose remote write completions under load. NIXL 1.5.2 also turns it
+# off per endpoint; the env var covers every other libfabric user in the image too.
 ENV FI_PROVIDER=efa \
+    FI_EFA_USE_UNSOLICITED_WRITE_RECV=0 \
     NCCL_GIN_TYPE=5 \
     NVIDIA_GDRCOPY=enabled
-# Do NOT set NIXL_ETCD_ENDPOINTS here: NIXL 1.5.0 treats a set-but-empty value as an error
+# Do NOT set NIXL_ETCD_ENDPOINTS here: the NIXL wheel treats a set-but-empty value as an error
 # ("Config parameter 'NIXL_ETCD_ENDPOINTS' needs non-empty value") and every nixl_agent(),
 # including vLLM's NixlConnector, fails. Unset = no etcd, peers exchange metadata directly.
 
@@ -240,10 +271,10 @@ sys.exit(0 if ok else 1)"; \
         echo "OK: $(basename "$f") has SASS for ${TORCH_CUDA_ARCH_LIST} (has:$have)"; \
     done
 
-LABEL org.opencontainers.image.description="vLLM ${VLLM_VERSION} (vllm/vllm-openai:v0.33.0-x86_64-efa) + DeepEP V2 ${DEEPEP_REF} (NCCL GIN/EFA-GDA) + NIXL v1.5.0 LIBFABRIC tests; EFA installer 1.51.0; sm_90/sm_100/sm_103/sm_120"
+LABEL org.opencontainers.image.description="vLLM ${VLLM_VERSION} (vllm/vllm-openai:v0.33.0-x86_64-efa) + DeepEP V2 ${DEEPEP_REF} (NCCL GIN/EFA-GDA) + NIXL v1.5.2 LIBFABRIC tests; EFA installer 1.51.0; sm_90/sm_100/sm_103/sm_120"
 LABEL vllm.version="${VLLM_VERSION}" \
       torch.version="${TORCH_VERSION}+cu130" \
-      nixl.ref="v1.5.0" \
+      nixl.ref="v1.5.2" \
       deepep.ref="amazon-contributing/DeepEP@${DEEPEP_REF}" \
       efa.installer="1.51.0" \
       base.image="vllm/vllm-openai:v0.33.0-x86_64-efa@sha256:5fc20aa179d3f7f83aa4a8b66473edf80582d865c62b630e49a207c76b9a0886"

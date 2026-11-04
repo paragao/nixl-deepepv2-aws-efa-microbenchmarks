@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 #
-# DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.0 (LIBFABRIC over EFA) image.
+# DeepEP V2 (NCCL GIN / EFA-GDA) + NIXL v1.5.2 (LIBFABRIC over EFA) image.
 #
 # The lower half of this file follows the awslabs reference
 #   awsome-distributed-ai/micro-benchmarks/expert-parallelism/deepep-v2-benchmark/deepep.Dockerfile
@@ -12,11 +12,11 @@
 # plugin, type 5), GIN-capable NCCL 2.31.2, GDRCopy v2.5.2, torch 2.11.0+cu130, and
 # DeepEP V2 from amazon-contributing/DeepEP.
 #
-# The upper half layers NIXL v1.5.0 on top, built from source with ONLY its LIBFABRIC
+# The upper half layers NIXL v1.5.2 on top, built from source with ONLY its LIBFABRIC
 # backend (the EFA data path NIXL uses for KV-cache transfer). EFA does not support
 # UCX, so there is no UCX build and no UCX plugin. Both transports ride one EFA stack:
 #   - DeepEP V2  -> NCCL GIN (EFA-GDA, type 5) via aws-ofi-nccl
-#   - NIXL 1.5.0 -> LIBFABRIC plugin over the same libfabric/EFA stack
+#   - NIXL 1.5.2 -> LIBFABRIC plugin over the same libfabric/EFA stack
 # NIXL's LIBFABRIC and backend-free C++ tests ship in /opt/nixl-tests.
 #
 # Build (multi-arch: Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300
@@ -24,7 +24,7 @@
 #   DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
 #     --build-arg TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0" \
 #     --build-arg NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_120,code=sm_120" \
-#     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.0-deepepv2-efa1.51.0 .
+#     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.2-deepepv2-efa1.51.0 .
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
@@ -39,9 +39,11 @@ ARG NCCL_VERSION=2.31.2
 ARG PYTHON_VERSION=3.10
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_CUDA_INDEX=cu130
-# NIXL release to build (git tag in ai-dynamo/nixl). v1.5.0 = 1683cf3 (2026-09-30).
-ARG NIXL_REF="v1.5.0"
-ARG NIXL_COMMIT=1683cf3b7f3d11674c03c5e861cea22339876c96
+# NIXL release to build (git tag in ai-dynamo/nixl). v1.5.2 = e72c52c (2026-10-28): fixes two
+# libfabric 2.7 (EFA 1.51) WRITE bugs in 1.5.0 -- an unlocked endpoint race (#2308) and
+# unsolicited write recv left on (#2494).
+ARG NIXL_REF="v1.5.2"
+ARG NIXL_COMMIT=e72c52c78478d2e1ca9e9c57b872114e113ad767
 
 # CUDA architecture(s), semicolon-separated. Compute-capability mapping:
 #   9.0  = Hopper          -> H100 / H200          (sm_90)
@@ -213,7 +215,7 @@ RUN NCCL_LIB="$(dirname "$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/
        || { echo "FATAL: nccl-tests binaries missing"; exit 1; }
 ENV PATH="${NCCL_TESTS_PREFIX}/build:$PATH"
 
-################################ NIXL v1.5.0 ####################################
+################################ NIXL v1.5.2 ####################################
 # Build from source with meson/ninja, LIBFABRIC plugin ONLY (EFA does not support
 # UCX, so there is no UCX build). hwloc is needed by the LIBFABRIC plugin; the EFA
 # installer above placed libfabric (>=2.6) under /opt/amazon/efa.
@@ -275,7 +277,7 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     && pip3 install --no-deps /tmp/nixl \
     && cd / && rm -rf /tmp/nixl \
     # The thin `nixl` meta-wheel, so both `import nixl` and `import nixl_cu13` work.
-    && pip3 install --no-deps "nixl==1.5.0"
+    && pip3 install --no-deps "nixl==1.5.2"
 
 # ===========================================================================
 # SQUASH STAGE: flatten the whole builder tree into a SINGLE layer.
@@ -336,7 +338,11 @@ ENV NVIDIA_GDRCOPY=enabled \
 
 ################################ Runtime hints ##################################
 # DeepEP V2 EFA-GDA (GIN type 5) runtime selection; see awslabs README.
+# FI_EFA_USE_UNSOLICITED_WRITE_RECV=0: libfabric >= 2.0 turns unsolicited write recv on by
+# default, and it can lose remote write completions under load. NIXL also turns it off
+# per endpoint; the env var covers every other libfabric user in the image too.
 ENV FI_PROVIDER=efa \
+    FI_EFA_USE_UNSOLICITED_WRITE_RECV=0 \
     NCCL_GIN_TYPE=5
 
 # NCCL net/tuner plugin selection. The aws-ofi-nccl plugin ships as
@@ -348,8 +354,8 @@ ENV FI_PROVIDER=efa \
 ENV NCCL_NET_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
     NCCL_TUNER_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi.so
 
-# NIXL LIBFABRIC backend uses the same EFA provider.
-ENV NIXL_ETCD_ENDPOINTS=""
+# NIXL_ETCD_ENDPOINTS is left unset: unset = no etcd, peers exchange metadata directly.
+# A set-but-empty value makes the NIXL wheel's nixl_agent() fail ("needs non-empty value").
 
 # Register gdrcopy (GPUDirect RDMA, libgdrapi.so) with the dynamic loader via the
 # standard /etc/ld.so.conf.d mechanism so it resolves for EVERY process, not only
@@ -432,11 +438,14 @@ RUN set -e; \
 import deep_ep; print('OK import deep_ep'); \
 import importlib.util as u; s=u.find_spec('nixl_cu13') or u.find_spec('nixl'); \
 print('OK nixl bindings:', s.name) if s else (print('FATAL: no nixl'), sys.exit(1)); \
-from importlib.metadata import version as v; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
+from importlib.metadata import version as v, distributions as ds; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
+nx={d.metadata['Name'].lower().replace('_','-'): d.version for d in ds() if d.metadata['Name'].lower().replace('_','-') in ('nixl','nixl-cu13')}; print('nixl dists:', nx); \
+bad=[k for k,x in nx.items() if x!='1.5.2']; \
+(print('FATAL: NIXL dists not 1.5.2:', bad), sys.exit(1)) if bad or 'nixl' not in nx else None; \
 sys.exit(0 if g=='2.31.2' else (print('FATAL: NCCL', g, 'need 2.31.2') or 1))"
 
-LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e)"
-LABEL nixl.ref="v1.5.0"
+LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.2 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (Hopper H100/H200 + Blackwell B200/B300 + Grace-Blackwell GB200/GB300 + RTX PRO 6000 Blackwell on g7e)"
+LABEL nixl.ref="v1.5.2"
 ARG DEEPEP_REF=d75f22a5e07c95eb0bae94ad6445a5009c06c886
 LABEL deepep.ref="amazon-contributing/DeepEP@${DEEPEP_REF}"
 LABEL efa.installer="1.51.0"
