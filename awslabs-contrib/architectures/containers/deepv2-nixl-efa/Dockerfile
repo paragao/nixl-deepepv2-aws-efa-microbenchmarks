@@ -438,7 +438,7 @@ import deep_ep; print('OK import deep_ep'); \
 import importlib.util as u; s=u.find_spec('nixl_cu13') or u.find_spec('nixl'); \
 print('OK nixl bindings:', s.name) if s else (print('FATAL: no nixl'), sys.exit(1)); \
 from importlib.metadata import version as v, distributions as ds; g=v('nvidia-nccl-cu13'); print('nvidia-nccl-cu13:', g); \
-nx={d.metadata['Name'].lower().replace('_','-'): d.version for d in ds() if d.metadata['Name'].lower().replace('_','-') in ('nixl','nixl-cu13')}; print('nixl dists:', nx); \
+nx={d.metadata['Name'].lower().replace('_','-'): d.version for d in ds() if d.metadata['Name'].lower().replace('_','-').startswith('nixl')}; print('nixl dists:', nx); \
 bad=[k for k,x in nx.items() if x!='1.5.2']; \
 (print('FATAL: NIXL dists not 1.5.2:', bad), sys.exit(1)) if bad or 'nixl' not in nx else None; \
 sys.exit(0 if g=='2.31.2' else (print('FATAL: NCCL', g, 'need 2.31.2') or 1))"
