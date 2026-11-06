@@ -233,10 +233,10 @@ license_policy:
         source of these exact versions available (they are on PyPI at the pinned
         versions in vllm-requirements.txt). Modifying any of these files would
         make the change itself MPL/LGPL -- do not patch them in this image.
-      # Needs an OSS/legal sign-off before publish. While true, a component that
-      # only passes through this exception turns the verdict into PENDING-APPROVAL
-      # (exit 2), not SIGN-OFF. Set to false once approved.
-      pending_approval: true
+      # Signed off by the repo owner (paragao) on 2026-11-06 for the vllm0.33.0-efa-slim
+      # image (sha256:94da4fa4...). While true, a component that only passed through this
+      # exception made the verdict PENDING-APPROVAL (exit 2) instead of SIGN-OFF.
+      pending_approval: false
       package_type: pypi
       packages:
         - certifi            # MPL-2.0 (Mozilla CA bundle)

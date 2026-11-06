@@ -5,7 +5,7 @@ userspace stack:
 
 - **DeepEP V2**: MoE dispatch/combine over **NCCL GIN** (GPUDirect Async,
   kernel-initiated RDMA; aws-ofi-nccl EFA-GDA plugin, type 5).
-- **NIXL v1.5.0**: KV-cache and tensor transfer over its **LIBFABRIC** backend,
+- **NIXL v1.5.2**: KV-cache and tensor transfer over its **LIBFABRIC** backend,
   on the same EFA libfabric.
 
 EFA does not support UCX. Every NIXL path in these images is LIBFABRIC only: there
@@ -21,7 +21,7 @@ environment; EFA/RDMA is the default.
 | [`Dockerfile`](./Dockerfile) | `nvidia/cuda:13.0.2-devel-ubuntu22.04`, built from source | DeepEP V2 + NIXL + nccl-tests + OpenMPI, torch 2.11.0, Python 3.10 | microbenchmarks (NCCL tests, DeepEP, NIXL) |
 | [`Dockerfile.vllm`](./Dockerfile.vllm) | `vllm/vllm-openai:v0.33.0-x86_64-efa` (by digest) | vLLM 0.33.0 + DeepEP V2 + NIXL LIBFABRIC tests, torch 2.14.0, Python 3.12 | serving with vLLM, incl. disaggregated prefill/decode with `NixlConnector` over EFA |
 
-Both carry NCCL 2.31.2 (GIN), EFA installer 1.51.0, NIXL v1.5.0 (LIBFABRIC) and
+Both carry NCCL 2.31.2 (GIN), EFA installer 1.51.0, NIXL v1.5.2 (LIBFABRIC) and
 DeepEP V2 at `amazon-contributing/DeepEP@d75f22a5`. They differ in how they get
 there. See [vLLM image](#vllm-image-dockerfilevllm) below.
 
@@ -36,21 +36,21 @@ there. See [vLLM image](#vllm-image-dockerfilevllm) below.
 | NCCL | 2.31.2 (GIN) | pinned once, in the torch layer; exports `ncclCommQueryProperties` |
 | GDRCopy | v2.5.2 | GPUDirect RDMA |
 | DeepEP V2 | `amazon-contributing/DeepEP@d75f22a5` | NCCL GIN backend |
-| NIXL | v1.5.0 (commit `1683cf3`) | `-Denable_plugins=LIBFABRIC` only |
+| NIXL | v1.5.2 (commit `e72c52c`) | `-Denable_plugins=LIBFABRIC` only |
 | PyTorch | 2.11.0 (`cu130`) | Python 3.10 |
 | nccl-tests | `master` | `all_reduce_perf`, `all_gather_perf`, `alltoall_perf` on `PATH` |
-| NIXL tests | from NIXL v1.5.0 | `/opt/nixl-tests`, see below |
+| NIXL tests | from NIXL v1.5.2 | `/opt/nixl-tests`, see below |
 | GPU arch | sm_90, sm_100, sm_103, sm_120 | H100/H200, B200/B300, GB200/GB300, RTX PRO 6000 (g7e) |
 
 NIXL tests shipped in `/opt/nixl-tests`:
 
 | Binary | What it checks |
 |---|---|
-| `libfabric_topology_test` | EFA rail / GPU topology seen by the LIBFABRIC backend (reads the `*-topo.xml` files next to it) |
+| `libfabric_topology_test` | EFA rail / GPU topology seen by the LIBFABRIC backend. Run it as `libfabric_topology_test p5en.48xl`; with no argument it also runs built-in scenarios for other instance types, which fail on p5en |
 | `rail_active_refcount_test` | LIBFABRIC rail reference counting |
 | `desc_example` | descriptor lists (no backend) |
 | `p2p_test` | point-to-point helpers |
-| `serdes_test` | serializer (no backend); run by the final build gate |
+| `serdes_test` | serializer (no backend) |
 | `telemetry_reader` | reads NIXL telemetry |
 
 Not built or not shipped, because each hard-codes the UCX backend: `nixl_ep` (NIXL EP),
@@ -147,7 +147,7 @@ The vLLM image has no OpenMPI and no nccl-tests, so it is not launched with `mpi
 |---|---|
 | awslabs base | Follows [`reference/deepep.Dockerfile`](./reference/deepep.Dockerfile) (vendored unchanged). Changes from it: EFA installer 1.51.0 with a sha256 check, DeepEP pinned to `d75f22a5`, NCCL 2.31.2 pinned once in the torch layer, `debhelper`/`devscripts` dropped |
 | nccl-tests | MPI-enabled perf tests built against the GIN NCCL |
-| NIXL v1.5.0 | meson build with `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` |
+| NIXL v1.5.2 | meson build with `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` |
 | Squash stage | `COPY --from=builder / /` into a fresh CUDA base |
 | Runtime ENV + gates | EFA/GIN env, loader config, hygiene, final binary + import gate |
 
@@ -173,7 +173,7 @@ Multi-arch default (Hopper, Blackwell, Grace-Blackwell, RTX PRO 6000 on g7e):
 ```bash
 cd architectures/containers/deepv2-nixl-efa
 DOCKER_BUILDKIT=1 docker build --progress=plain -f Dockerfile \
-  -t <registry>/deepv2-nixl-efa:nixl1.5.0-deepepv2-efa1.51.0 .
+  -t <registry>/deepv2-nixl-efa:nixl1.5.2-deepepv2-efa1.51.0 .
 ```
 
 Compute-capability map: `9.0` = Hopper (sm_90), `10.0` = Blackwell DC (sm_100, incl.
@@ -200,7 +200,7 @@ The NIXL arch list (`-Dnixl_cuda_arch_list`) is fixed at `90,100,103,120` in thi
 | `NCCL_VERSION` | `2.31.2` | `==` |
 | `GDRCOPY_VERSION` | `v2.5.2` | tag |
 | `DEEPEP_REF` | `d75f22a5e07c95eb0bae94ad6445a5009c06c886` | commit SHA |
-| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b...` | tag, asserted to equal the commit |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.2` / `e72c52c7...` | tag, asserted to equal the commit |
 | `TORCH_VERSION` | `2.11.0` (`cu130`) | `==` |
 | `PYTHON_VERSION` | `3.10` | Ubuntu 22.04 package |
 | `NCCL_TESTS_REF` | `master` | not pinned |
@@ -209,8 +209,36 @@ The NIXL arch list (`-Dnixl_cuda_arch_list`) is fixed at `90,100,103,120` in thi
 
 ### Validated build (`Dockerfile`)
 
-**Current branch: pending pipeline run.** No digest has been built or validated from
-this version of the Dockerfile yet.
+Built from commit `c8a6180` (rootless BuildKit, `--no-cache`, default build-args, 25 min)
+and pushed as
+
+```
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deepepv2-efa1.51.0-slim
+@sha256:7fba91f1ce100ef2425b1df172f75a9b9da49aa0e6da10799af30291fa3be59f
+```
+
+About 9.9 GiB compressed (the previous `091ce165` was 10.2 GiB), one squashed layer,
+linux/amd64. Every in-build gate passed. `cuobjdump` in a fresh pod pulled by digest shows
+SASS for sm_90 / sm_100 / sm_103 / sm_120 in DeepEP V2 `_C*.so` and the three nccl-tests
+binaries. Every installed `nixl*` package is 1.5.2. License gate: SIGN-OFF, 0 blocked,
+0 pending.
+
+Validation gate, 2 x p5en.48xlarge, 16 ranks, mean of 3 runs (2026-11-05):
+
+| Metric | Floor | 3 runs | Mean | Result |
+|---|---|---|---|---|
+| NCCL all_reduce busbw @8G (GB/s) | 462.2 | 477.93 / 478.20 / 477.98 | 478.0 | PASS |
+| NCCL all_gather busbw @8G | 342.3 | 349.22 / 349.21 / 349.23 | 349.2 | PASS |
+| NCCL all_to_all busbw @8G | 81.0 | 83.52 / 83.61 / 83.65 | 83.6 | PASS |
+| DeepEP V2 dispatch bus BW | 259.0 | 266.1 / 266.2 / 266.0 | 266.1 | PASS |
+| DeepEP V2 combine bus BW | 177.6 | 193.5 / 193.2 / 193.0 | 193.2 | PASS |
+| NIXL 1 GPU READ (`nixl_lf`) | 45.8 | 46.89 / 47.01 / 46.56 | 46.82 | PASS |
+| NIXL 8 GPU WRITE, 20 x 1 GiB per GPU (sum) | 371 | 382.64 / 382.51 / 382.75 | 382.63 | PASS |
+| NIXL 8 GPU READ, 20 x 1 GiB per GPU (sum) | (382.5 ref) | 383.33 / 383.01 / 382.85 | 383.06 | PASS |
+
+Every NIXL run used LIBFABRIC only and verified every transfer (160/160 per 8-GPU run,
+GPU 0 included) with 0 `post failed` lines. NIXL tests and GDRCopy `sanity` / `copybw` /
+`copylat` pass in a GPU pod; the NIXL plugin list is `['LIBFABRIC']`.
 
 History (not this Dockerfile): the previous version, at commit `020e077` (EFA 1.50.0,
 DeepEP `main`, NIXL with UCX + LIBFABRIC + POSIX, NIXL EP and `nixl_test` shipped), was
@@ -245,7 +273,7 @@ Base: `vllm/vllm-openai:v0.33.0-x86_64-efa@sha256:5fc20aa179d3f7f83aa4a8b66473ed
 | NCCL | 2.31.2 (GIN, `nvidia-nccl-cu13` wheel) |
 | EFA installer | 1.51.0: libfabric 2.7.0, aws-ofi-nccl 1.22.0, `NCCL_NET_PLUGIN=ofi` |
 | GDRCopy | 2.5.1 (NVIDIA deb) |
-| NIXL | 1.5.0 wheel (`nixl-cu13`); its LIBFABRIC plugin links `/opt/amazon/efa/lib/libfabric.so.1` |
+| NIXL | 1.5.0 wheel (`nixl-cu13`); replaced by 1.5.2 in `Dockerfile.vllm` (see below) |
 | Mooncake | 0.3.13.post1 (EFA) |
 | LMCache | 0.5.6 |
 | FlashInfer | 0.7.2.post1 |
@@ -258,11 +286,12 @@ this image selects it.
 
 | Item | Detail |
 |---|---|
+| NIXL 1.5.2 wheels | `nixl-cu13` and `nixl` 1.5.2 from PyPI (sha256-pinned, `--no-deps`) in place of the base's 1.5.0. See [EFA 1.51.0 and NIXL 1.5.2](#efa-1510-and-nixl-152) |
 | DeepEP V2 at `d75f22a5` | Rebuilt for sm_90 / sm_100 / sm_103 / sm_120. Carries 9 EFA fixes newer than the base's `874779c` (GIN flush before exit, `gin.flush` timeout, proxy ring wait, hybrid dispatch races) |
-| NIXL LIBFABRIC tests | The same six tests as the base image, built from NIXL `1683cf3` with `-Denable_plugins=LIBFABRIC` in a discarded stage. Installed in `/opt/nixl-tests` with their libraries in `/opt/nixl` |
+| NIXL LIBFABRIC tests | The same six tests as the base image, built from NIXL `e72c52c` (v1.5.2) with `-Denable_plugins=LIBFABRIC` in a discarded stage. Installed in `/opt/nixl-tests` with their libraries in `/opt/nixl` |
 | `nixl-test` wrapper | `nixl-test <name> [args]` runs `/opt/nixl-tests/<name>` against `/opt/nixl`. `/opt/nixl` stays off the global loader path, so vLLM keeps using the wheel's libnixl |
 | Runtime ENV | `FI_PROVIDER=efa`, `NCCL_GIN_TYPE=5`, `NVIDIA_GDRCOPY=enabled` |
-| Build gates | vLLM / torch / NCCL versions unchanged; NCCL GIN symbol; aws-ofi-nccl plugins in the loader cache; `libgdrapi.so.2`; the wheel's LIBFABRIC plugin resolves to the EFA libfabric; every NIXL test resolves and `serdes_test` runs; `deep_ep.ElasticBuffer` exists; DeepEP `_C*.so` has SASS for every arch |
+| Build gates | vLLM / torch / NCCL versions unchanged; NCCL GIN symbol; aws-ofi-nccl plugins in the loader cache; `libgdrapi.so.2`; the wheel's LIBFABRIC plugin resolves to the EFA libfabric; NIXL wheels are 1.5.2; `NIXL_ETCD_ENDPOINTS` is unset or non-empty; every NIXL test resolves; `deep_ep.ElasticBuffer` exists; DeepEP `_C*.so` has SASS for every arch |
 
 Files no longer used by either Dockerfile: [`vllm-requirements.txt`](./vllm-requirements.txt),
 [`flashinfer-kernels.txt`](./flashinfer-kernels.txt) and [`deadsnakes.asc`](./deadsnakes.asc).
@@ -298,7 +327,8 @@ Build context: `Dockerfile.vllm`, `setup_deepep_gin.sh`, `build-requirements.txt
 |---|---|---|
 | `BASE_IMAGE` | `vllm/vllm-openai:v0.33.0-x86_64-efa` | digest `sha256:5fc20aa1...` |
 | `DEEPEP_REF` | `d75f22a5e07c95eb0bae94ad6445a5009c06c886` | commit SHA |
-| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b...` | tag, asserted to equal the commit |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.2` / `e72c52c7...` | tag, asserted to equal the commit |
+| `NIXL_VERSION` + wheel sha256s | `1.5.2`; `nixl-cu13` `591eda3f...`, `nixl` `e4ef5e16...` | `--require-hashes` |
 | `build-requirements.txt` | meson, ninja, pybind11 and friends | `--require-hashes`, NIXL test stage only |
 | `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | also sets the NIXL arch list |
 | `VLLM_VERSION`, `TORCH_VERSION`, `NCCL_VERSION` | `0.33.0`, `2.14.0`, `2.31.2` | asserted, not installed |
@@ -318,12 +348,15 @@ license metadata, and two scoped exceptions:
 | Exception | Packages | Licenses | State |
 |---|---|---|---|
 | `permissive-extra` | detect-installer, email-validator, pillow, regex, supervisor | 0BSD, Unlicense, MIT-CMU, CNRI-Python, Repoze | approved |
-| `weak-copyleft-unmodified` | certifi, tqdm, orjson, pycountry | MPL-2.0, LGPL-2.1-only | **pending approval** |
+| `weak-copyleft-unmodified` | certifi, tqdm, orjson, pycountry | MPL-2.0, LGPL-2.1-only | approved 2026-11-06 |
 
-These were set from the SBOM of the earlier, source-built vLLM image. The new base
-(Mooncake, LMCache and others) may add packages the gate has not seen; the first
-pipeline run on this Dockerfile will show them. While an exception has
-`pending_approval: true` the gate prints `LICENSE GATE: PENDING-APPROVAL` and exits 2.
+The vllm-openai base also needed: a hygiene step that removes setuptools `autocommand`,
+the `pkg_resources` test fixture and the system-Python debs `software-properties-common`
+pulls in (python3-apt, python3-gi, launchpadlib, lazr, wadllib, blinker, pyparsing), and
+pins for `accelerate` (Apache-2.0), `gguf` (MIT) and `mooncake-transfer-engine*`
+(Apache-2.0, from the wheel classifier and upstream repo; the wheel has no LICENSE file).
+With those, the gate gives 0 BLOCK and SIGN-OFF. An exception with
+`pending_approval: true` makes the gate print `LICENSE GATE: PENDING-APPROVAL` and exit 2.
 Run its tests with `python3 -m unittest test_check_licenses.py`.
 
 ### Run vLLM
@@ -353,8 +386,55 @@ Run a NIXL test: `nixl-test libfabric_topology_test` prints the EFA rail layout.
 
 ### Validated build (`Dockerfile.vllm`)
 
-**Current branch: pending pipeline run.** No digest has been built or validated from
-this version of `Dockerfile.vllm` yet.
+Built from commit `c8a6180` (rootless BuildKit, `--no-cache`, 13 min) and pushed as
+
+```
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:vllm0.33.0-efa-slim-nixl152
+@sha256:94da4fa48b300546520f4572a3efe92d3314a29899538a9eebd1d3507f629761
+```
+
+About 9.9 GiB compressed (the previous source-built `eeaa6801` was 10.8 GiB),
+linux/amd64. Every in-build gate passed. DeepEP V2 `_C*.so` has SASS for sm_90 / sm_100 /
+sm_103 / sm_120. License gate: 0 blocked; the 4 `weak-copyleft-unmodified` wheels were
+approved on 2026-11-06.
+
+Results (2 x p5en.48xlarge, mean of 3 runs, 2026-11-04 / 05):
+
+| Metric | Floor / reference | Mean | Result |
+|---|---|---|---|
+| DeepEP V2 dispatch bus BW (torchrun, 2 x 8 ranks) | 259.0 | 265.9 | PASS |
+| DeepEP V2 combine bus BW | 177.6 | 193.1 | PASS |
+| NIXL 1 GPU READ (`nixl_lf`) | 45.8 | 46.91 | PASS |
+| NIXL 8 GPU WRITE (sum, GB/s) | 371 | 383.0 | PASS |
+| NIXL 8 GPU READ (sum, GB/s) | 382.5 ref | 383.0 | PASS |
+| 1P1D TP8 + TP8, 8 / 32 / 128 users (tok/s) | 17,040 / 43,868 / 56,809 | 17,015 / 43,840 / 56,715 | PASS (-0.15% / -0.06% / -0.17%) |
+| Smoke TP8 FA4, 1 user TPOT ms / tok/s | 5.38 / 2,634 (`eeaa6801`) | 5.38 / 2,636 | PASS |
+| Smoke TP8 FA4, 32 users TPOT ms / tok/s | 15.02 / 28,468 | 15.04 / 28,431 | PASS |
+
+1P1D: 0 failed requests, 0 failed KV transfers (14,976), 0 `post failed` lines,
+LIBFABRIC on 8/8 ranks per pod, 16 EFA rails. The smoke numbers are from the build one
+commit earlier (`9cf70d6`); the only change since is the removed
+`FI_EFA_USE_UNSOLICITED_WRITE_RECV` ENV. There is no NCCL suite: this image has no
+OpenMPI and no nccl-tests.
+
+### EFA 1.51.0 and NIXL 1.5.2
+
+With EFA 1.51.0 (libfabric 2.7.0), NIXL 1.5.0 WRITE fails. 8-GPU WRITE lost GPU 0 on
+every run (`drainPostQueue: post failed ret=-22 (Invalid argument) on rail 0`, or an EFA
+provider abort: `Packet already processed`), and vLLM 1P1D lost its decode engine after
+a few hundred KV transfers. EFA 1.50.0 (libfabric 2.6.0) did not show it. Two NIXL bugs,
+both fixed in v1.5.2:
+
+| Bug | Fix |
+|---|---|
+| The progress thread posts and polls rail 0 without the endpoint lock, racing the caller's notification sends; libfabric 2.7 corrupts endpoint state | [ai-dynamo/nixl#2308](https://github.com/ai-dynamo/nixl/pull/2308) |
+| The PyPI wheel, built against libfabric 1.21 headers, never turns off EFA unsolicited write recv, which can lose remote write completions | [ai-dynamo/nixl#2494](https://github.com/ai-dynamo/nixl/pull/2494) |
+
+NIXL 1.5.2 logs `Successfully disabled unsolicited write recv for rail N` per endpoint.
+Do not also set `FI_EFA_USE_UNSOLICITED_WRITE_RECV=0` for the whole image: it makes
+aws-ofi-nccl's GIN `createContext` hang, so DeepEP V2 never starts. Do not set
+`NIXL_ETCD_ENDPOINTS=""` either: the NIXL wheel rejects an empty value and no agent
+starts. Leave it unset.
 
 History (not this Dockerfile). The previous `Dockerfile.vllm`, at commit `12a6ae6`, built
 vLLM v0.33.0 from source on `nvidia/cuda:13.0.2` (deadsnakes Python 3.12, hashed
@@ -508,7 +588,8 @@ run, 3 runs. This replaces NIXL's `nixl_test`, which hard-codes UCX; the four
 |---|---|---|---|
 | 1 GPU READ, mean GB/s | 47.2 | 45.8 (-3%) | 8 GPUs: 382.5 GB/s READ, 382.2 GB/s WRITE (sum) |
 
-Baseline from image `eeaa6801`, 2 x p5en, 2026-11-03.
+Baseline from image `eeaa6801`, 2 x p5en, 2026-11-03. The 8-GPU cases use
+`NIXL_GPUS="0 1 2 3 4 5 6 7" NIXL_TEST_ARGS="--iters 20"`.
 
 ---
 
@@ -518,11 +599,12 @@ The pipeline publishes the validated image to ECR. Set the environment variables
 (see the repo root `env.example.sh`) and substitute them:
 
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.51.0
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.2-deepepv2-efa1.51.0
 ```
 
-No image has been published from the current Dockerfile yet (see
-[Validated build](#validated-build-dockerfile)). Earlier images carry `efa1.50.0` tags.
+The validated dev images are listed under [Validated build](#validated-build-dockerfile)
+and [Validated build (`Dockerfile.vllm`)](#validated-build-dockerfilevllm). Earlier
+images carry `efa1.50.0` tags.
 
 Pull it (the auth token is minted with `--region ${ECR_TOKEN_REGION}`, but the registry
 host and repo are in `${ECR_REGION}`; some accounts require a specific token-mint region):
@@ -530,13 +612,13 @@ host and repo are in `${ECR_REGION}`; some accounts require a specific token-min
 ```bash
 aws ecr get-login-password --region ${ECR_TOKEN_REGION} \
   | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com
-docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.51.0
+docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.2-deepepv2-efa1.51.0
 ```
 
 A dev image may live in a separate per-user repo in the same account:
 
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.51.0
+${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deepepv2-efa1.51.0
 @${IMAGE_DIGEST}
 ```
 

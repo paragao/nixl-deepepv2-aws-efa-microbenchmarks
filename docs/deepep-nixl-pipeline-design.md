@@ -21,7 +21,7 @@ EFA (Elastic Fabric Adapter) userspace stack:
 
 - **DeepEP V2** — Mixture-of-Experts dispatch/combine over **NCCL GIN** (GPUDirect
   Async kernel-initiated RDMA, aws-ofi-nccl plugin **type 5**, EFA-GDA path).
-- **NIXL v1.5.0** — KV-cache / tensor transfer over its **LIBFABRIC** backend
+- **NIXL v1.5.2** — KV-cache / tensor transfer over its **LIBFABRIC** backend
   (same EFA libfabric). EFA does not support UCX, so LIBFABRIC is the only NIXL
   backend built, shipped or tested.
 - **EFA installer 1.51.0** (sha256-checked) — `>=1.50` ships the EFA-GDA
@@ -121,7 +121,7 @@ The pipeline must deliver seven things, in order:
    license. ECR enhanced scanning runs in parallel for the record.
 4. **Validate** — CodeBuild assumes a cluster-scoped IAM role, `kubectl apply`s the MPIJobs, waits for completion, parses logs, gates on all tests passing (and the §6.5 throughput floors).
 5. **Publish** — on pass, retag the **same digest** to `:validated` and
-   `:nixl1.5.0-deepepv2-efa1.51.0`, attach the SBOM, and write the
+   `:nixl1.5.2-deepepv2-efa1.51.0`, attach the SBOM, and write the
    self-documentation labels (purpose + run command, D13) and the git-source
    back-pointer (D12).
 6. **Cross-pointer (D12)** — set the ECR repo description to point at the git
@@ -142,7 +142,7 @@ their own image. It is a **two-stage** build (`builder` → squashed `final`), b
 | **Base + ARGs** | CUDA 13.0.2 devel, all versions as `ARG`s | Change `TORCH_CUDA_ARCH_LIST` / `NVCC_GENCODE` for a different GPU arch |
 | **① awslabs base** | EFA installer 1.51.0 (sha256-checked), GDRCopy v2.5.2, torch 2.11.0+cu130 with GIN NCCL 2.31.2 pinned in the same layer, DeepEP V2 at `d75f22a5` | Follows `reference/deepep.Dockerfile` (vendored unchanged). Changes from it: EFA 1.51.0 + sha256, DeepEP pinned to a commit, NCCL pinned once in the torch layer, `debhelper`/`devscripts` dropped |
 | **② nccl-tests** | MPI-enabled `all_reduce/all_gather/alltoall` perf tests against the GIN NCCL | NCCL EFA transport benchmarks |
-| **③ NIXL v1.5.0** | meson/ninja build, `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; no UCX build, no `nixl_ep`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` | The NIXL+EFA integration template; `enable_plugins` errors if LIBFABRIC can't be built, and the step fails if a UCX plugin appears |
+| **③ NIXL v1.5.2** | meson/ninja build, `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; no UCX build, no `nixl_ep`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` | The NIXL+EFA integration template; `enable_plugins` errors if LIBFABRIC can't be built, and the step fails if a UCX plugin appears |
 | **④ Squash stage** | `COPY --from=builder / /` into fresh CUDA base | The single-layer fix (D3) |
 | **⑤ Runtime ENV + final gate** | `FI_PROVIDER=efa`, `NCCL_GIN_TYPE=5`, absolute `NCCL_NET_PLUGIN`, `ldconfig` for gdrcopy; final `nm` + plugin + NIXL test + import gate | The "works with zero per-run env" contract |
 
@@ -228,7 +228,7 @@ Base `Dockerfile`:
 | `NCCL_VERSION` | `2.31.2` | GIN-capable NCCL (exports `ncclCommQueryProperties`), pinned once in the torch layer |
 | `GDRCOPY_VERSION` | `v2.5.2` | GPUDirect RDMA copy |
 | `DEEPEP_REF` | `d75f22a5e07c95eb0bae94ad6445a5009c06c886` (`amazon-contributing/DeepEP`) | DeepEP V2 source, by commit |
-| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b…` (2026-09-30) | NIXL source; tag asserted to equal the commit |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.2` / `e72c52c7…` (2026-10-28) | NIXL source; tag asserted to equal the commit. 1.5.2 fixes two libfabric 2.7 (EFA 1.51) WRITE bugs in 1.5.0 (ai-dynamo/nixl#2308, #2494) |
 | `TORCH_VERSION` | `2.11.0` (`cu130`) | PyTorch |
 | `PYTHON_VERSION` | `3.10` | interpreter |
 | `NCCL_TESTS_REF` | `master` | nccl-tests (not pinned) |
@@ -243,14 +243,14 @@ Base `Dockerfile`:
 |---|---|---|
 | `BASE_IMAGE` | `vllm/vllm-openai@sha256:5fc20aa179d3f7f83aa4a8b66473edf80582d865c62b630e49a207c76b9a0886` (`v0.33.0-x86_64-efa`) | base, by digest |
 | `DEEPEP_REF` | `d75f22a5…` | DeepEP V2 rebuild |
-| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.0` / `1683cf3b…` | NIXL LIBFABRIC tests |
+| `NIXL_REF` / `NIXL_COMMIT` | `v1.5.2` / `e72c52c7…` | NIXL LIBFABRIC tests; the base's 1.5.0 wheels are replaced by `nixl-cu13`/`nixl` 1.5.2 (sha256-pinned) |
 | `TORCH_CUDA_ARCH_LIST` | `9.0;10.0;10.3;12.0` | DeepEP + NIXL tests |
 | `VLLM_VERSION` / `TORCH_VERSION` / `NCCL_VERSION` | `0.33.0` / `2.14.0` / `2.31.2` | asserted unchanged from the base |
 | `build-requirements.txt` | `--require-hashes` | meson/ninja/pybind11 for the NIXL test stage |
 
 **Image labels** (base `Dockerfile`, queryable from the image alone):
 ```
-org.opencontainers.image.description = DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (...)
+org.opencontainers.image.description = DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.2 (LIBFABRIC only) on CUDA 13.0.2, EFA installer 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120 (...)
 nixl.ref        = v1.5.0
 deepep.ref      = amazon-contributing/DeepEP@d75f22a5e07c95eb0bae94ad6445a5009c06c886
 efa.installer   = 1.51.0
@@ -262,13 +262,14 @@ Add in CI: `org.opencontainers.image.revision=<gitsha>`,
 
 **Published image (${AWS_REGION}):**
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.0-deepepv2-efa1.51.0
+${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deepepv2-efa1.51.0
 @${IMAGE_DIGEST}
 ```
-Images from this branch: **pending pipeline run** (no digest yet). Last validated
-images, from the previous Dockerfiles (EFA 1.50.0, NIXL with UCX):
-base `091ce165` (commit `020e077`, ~10.2 GiB) and vLLM `eeaa6801` (commit `12a6ae6`,
-~10.8 GiB). Both are history and do not match the current Dockerfiles.
+Validated images from this branch (commit `c8a6180`, 2026-11-05; results in the
+container README): base `nixl1.5.2-deepepv2-efa1.51.0-slim@sha256:7fba91f1…` and vLLM
+`vllm0.33.0-efa-slim-nixl152@sha256:94da4fa4…`, both ~9.9 GiB. Earlier validated images,
+from the previous Dockerfiles (EFA 1.50.0, NIXL with UCX): base `091ce165` (commit
+`020e077`, ~10.2 GiB) and vLLM `eeaa6801` (commit `12a6ae6`, ~10.8 GiB).
 The pipeline (D1) publishes to **${ECR_REGION}** ECR, repo
 `${PUBLISH_REPO}` (to be created — the pipeline's publish
 stage creates it on first run if absent). Note the auth split (D1a): the login
@@ -468,7 +469,7 @@ places carry the "what + how", and they must agree:
 
 **(a) OCI labels baked at build time:**
 ```dockerfile
-LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.0 (LIBFABRIC only) on CUDA 13.0.2, EFA 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120"
+LABEL org.opencontainers.image.description="DeepEP V2 (NCCL GIN/EFA-GDA) + NIXL v1.5.2 (LIBFABRIC only) on CUDA 13.0.2, EFA 1.51.0, multi-arch sm_90/sm_100/sm_103/sm_120"
 LABEL org.opencontainers.image.source="https://github.com/<org>/<repo>/tree/<path>"   # back-pointer to the git recipe (D12)
 LABEL run.purpose="2-node GPU-collective benchmarking: NCCL (ar/ag/a2a), DeepEP V2 MoE dispatch/combine, NIXL transfer, over EFA"
 LABEL run.command="mpirun -np 16 -N 8 --bind-to none all_reduce_perf -b 8 -e 8G -f 2 -g 1   # see repo README for DeepEP / NIXL invocations"
@@ -489,7 +490,7 @@ specific repo, is what matters. The one hard requirement is a **two-way link**:
 
 | Direction | Where | What it says |
 |---|---|---|
-| git repo → registry | recipe repo README | the published image URI(s), e.g. `${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.0-deepepv2-efa1.51.0`, and that `:validated` tracks the latest signed-off digest |
+| git repo → registry | recipe repo README | the published image URI(s), e.g. `${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${PUBLISH_REPO}:nixl1.5.2-deepepv2-efa1.51.0`, and that `:validated` tracks the latest signed-off digest |
 | registry → git repo | ECR repo description + the `org.opencontainers.image.source` label | the git repo URL + path the image was built from |
 
 Set the ECR repo description back-pointer at publish time:
@@ -604,7 +605,7 @@ MANIFEST=$(aws ecr batch-get-image --repository-name ${PUBLISH_REPO} \
   --image-ids imageTag=candidate-$GITSHA --region ${ECR_REGION} \
   --profile ${AWS_PROFILE} --query 'images[0].imageManifest' --output text)
 aws ecr put-image --repository-name ${PUBLISH_REPO} \
-  --image-tag nixl1.5.0-deepepv2-efa1.51.0 --image-manifest "$MANIFEST" \
+  --image-tag nixl1.5.2-deepepv2-efa1.51.0 --image-manifest "$MANIFEST" \
   --region ${ECR_REGION} --profile ${AWS_PROFILE}
 # registry → git repo back-pointer + purpose/run (D12, D13)
 aws ecr put-repository-catalog-data \
@@ -630,7 +631,7 @@ git checkout -b deepep-v2-nixl-efa-template
 git add . && git commit -m "Add DeepEP V2 + NIXL + EFA build template and 2-node validation"
 git push -u origin deepep-v2-nixl-efa-template
 gh pr create --repo awslabs/awsome-distributed-ai \
-  --title "DeepEP V2 + NIXL v1.5.0 on EFA: reproducible build + 2-node validation" \
+  --title "DeepEP V2 + NIXL v1.5.2 on EFA: reproducible build + 2-node validation" \
   --body-file PR_BODY.md
 ```
 If the recipe lives in an org-internal repo instead, this stage is simply the
