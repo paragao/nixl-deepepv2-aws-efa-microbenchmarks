@@ -206,36 +206,48 @@ The NIXL arch list (`-Dnixl_cuda_arch_list`) is fixed at `90,100,103,120` in thi
 
 ### Validated build (`Dockerfile`)
 
-Built from commit `c8a6180` (rootless BuildKit, `--no-cache`, default build-args, 25 min)
+Built from commit `e7d45ef` (rootless BuildKit, `--no-cache`, default build-args, 18 min)
 and pushed as
 
 ```
-${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deepepv2-efa1.51.0-slim
-@sha256:7fba91f1ce100ef2425b1df172f75a9b9da49aa0e6da10799af30291fa3be59f
+${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deepepv2-efa1.51.0
+@sha256:a8688aadbc2fba04ddf6a7b1033837860b8870eb777284b08a332f7b19ac5916
 ```
 
-About 9.9 GiB compressed (the previous `091ce165` was 10.2 GiB), one squashed layer (this build predates the squash removal),
-linux/amd64. Every in-build gate passed. `cuobjdump` in a fresh pod pulled by digest shows
-SASS for sm_90 / sm_100 / sm_103 / sm_120 in DeepEP V2 `_C*.so` and the three nccl-tests
-binaries. Every installed `nixl*` package is 1.5.2. License gate: SIGN-OFF, 0 blocked,
-0 pending.
+About 10.0 GiB compressed, 30 layers (no squash), linux/amd64. Every in-build gate passed,
+including `OK: nccl-tests <b> loads the GIN libnccl.so.2` for all three binaries.
+`cuobjdump` in a fresh pod pulled by digest shows SASS for sm_90 / sm_100 / sm_103 /
+sm_120 in DeepEP V2 `_C*.so` and the nccl-tests binaries. Every installed `nixl*` package
+is 1.5.2. License gate: SIGN-OFF, 0 blocked, 0 pending.
 
-Validation gate, 2 x p5en.48xlarge, 16 ranks, mean of 3 runs (2026-11-05):
+Validation gate, 2 x p5en.48xlarge, 16 ranks, mean of 3 runs (2026-11-06). Every NCCL rank
+logs `NCCL version 2.31.2+cuda13.3` and `NET/OFI Selected provider is efa ... (found 16 nics)`:
 
 | Metric | Floor | 3 runs | Mean | Result |
 |---|---|---|---|---|
-| NCCL all_reduce busbw @8G (GB/s) | 462.2 | 477.93 / 478.20 / 477.98 | 478.0 | PASS |
-| NCCL all_gather busbw @8G | 342.3 | 349.22 / 349.21 / 349.23 | 349.2 | PASS |
-| NCCL all_to_all busbw @8G | 81.0 | 83.52 / 83.61 / 83.65 | 83.6 | PASS |
-| DeepEP V2 dispatch bus BW | 259.0 | 266.1 / 266.2 / 266.0 | 266.1 | PASS |
-| DeepEP V2 combine bus BW | 177.6 | 193.5 / 193.2 / 193.0 | 193.2 | PASS |
-| NIXL 1 GPU READ (`nixl_lf`) | 45.8 | 46.89 / 47.01 / 46.56 | 46.82 | PASS |
-| NIXL 8 GPU WRITE, 20 x 1 GiB per GPU (sum) | 371 | 382.64 / 382.51 / 382.75 | 382.63 | PASS |
-| NIXL 8 GPU READ, 20 x 1 GiB per GPU (sum) | (382.5 ref) | 383.33 / 383.01 / 382.85 | 383.06 | PASS |
+| NCCL all_reduce busbw @8G (GB/s) | 462.2 | 479.54 / 479.81 / 479.00 | 479.5 | PASS |
+| NCCL all_gather busbw @8G | 342.3 | 349.40 / 349.12 / 349.43 | 349.3 | PASS |
+| NCCL all_to_all busbw @8G | 81.0 | 87.84 / 87.81 / 87.79 | 87.8 | PASS |
+| DeepEP V2 dispatch bus BW | 259.0 | 266.1 / 265.9 / 265.8 | 266.0 | PASS |
+| DeepEP V2 combine bus BW | 177.6 | 193.2 / 193.0 / 192.4 | 192.9 | PASS |
+| NIXL 1 GPU READ (`nixl_lf`) | 45.8 | 46.80 / 46.75 / 46.88 | 46.81 | PASS |
+| NIXL 8 GPU WRITE, 20 x 1 GiB per GPU (sum) | 371 | 382.66 / 383.45 / 383.85 | 383.3 | PASS |
+| NIXL 8 GPU READ, 20 x 1 GiB per GPU (sum) | (382.5 ref) | 382.90 / 382.80 / 383.07 | 382.9 | PASS |
 
 Every NIXL run used LIBFABRIC only and verified every transfer (160/160 per 8-GPU run,
 GPU 0 included) with 0 `post failed` lines. NIXL tests and GDRCopy `sanity` / `copybw` /
 `copylat` pass in a GPU pod; the NIXL plugin list is `['LIBFABRIC']`.
+
+**NCCL version in earlier results.** Every earlier NCCL run in this README (images
+`091ce165`, `eeaa6801`, and the squashed slim build `7fba91f1`) ran on **NCCL 2.28.3**, not
+2.31.2. Their squash stage started from a fresh `nvidia/cuda` image, which ships apt NCCL
+2.28.3, and `COPY --from=builder / /` cannot delete it; nccl-tests found it first. DeepEP and
+NIXL always used 2.31.2. The NCCL gate floors were set on 2.28.3; 2.31.2 clears them
+(all_to_all +5%). The new build gate fails if nccl-tests do not load the 2.31.2
+`libnccl.so.2`.
+
+The squashed slim build `7fba91f1` (commit `c8a6180`, 9.9 GiB, one layer) passed the same
+gates, with NCCL on 2.28.3 (478.0 / 349.2 / 83.6).
 
 History (not this Dockerfile): the previous version, at commit `020e077` (EFA 1.50.0,
 DeepEP `main`, NIXL with UCX + LIBFABRIC + POSIX, NIXL EP and `nixl_test` shipped), was
@@ -456,7 +468,7 @@ Results on `eeaa6801`:
 
 | Metric | Baseline | Floor | Mean | Result |
 |---|---|---|---|---|
-| NCCL all_reduce busbw @8G | 476.5 | 462.2 | 477.7 | PASS |
+| NCCL all_reduce busbw @8G (NCCL 2.28.3, see above) | 476.5 | 462.2 | 477.7 | PASS |
 | NCCL all_gather busbw @8G | 352.9 | 342.3 | 349.0 | PASS |
 | NCCL all_to_all busbw @8G | 83.5 | 81.0 | 83.5 | PASS |
 | DeepEP V2 dispatch bus BW | 267.0 | 259.0 | 264.9 | PASS |

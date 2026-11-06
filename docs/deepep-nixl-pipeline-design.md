@@ -264,7 +264,7 @@ ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deep
 @${IMAGE_DIGEST}
 ```
 Validated images from this branch (commit `c8a6180`, 2026-11-05; results in the
-container README): base `nixl1.5.2-deepepv2-efa1.51.0-slim@sha256:7fba91f1…` and vLLM
+container README): base `nixl1.5.2-deepepv2-efa1.51.0@sha256:a8688aad…` (commit `e7d45ef`, no squash) and vLLM
 `vllm0.33.0-efa-slim-nixl152@sha256:94da4fa4…`, both ~9.9 GiB. Earlier validated images,
 from the previous Dockerfiles (EFA 1.50.0, NIXL with UCX): base `091ce165` (commit
 `020e077`, ~10.2 GiB) and vLLM `eeaa6801` (commit `12a6ae6`, ~10.8 GiB).
