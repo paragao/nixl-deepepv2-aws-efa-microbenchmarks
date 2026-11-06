@@ -27,7 +27,7 @@
 #     -t <registry>/<repo>/nixl-deepep-efa:nixl1.5.2-deepepv2-efa1.51.0 .
 
 ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 ARG GDRCOPY_VERSION=v2.5.2
 # 1.51.0 = the EFA installer vLLM's own EFA image (vllm/vllm-openai:v0.33.0-efa) uses.
@@ -279,62 +279,25 @@ RUN git clone https://github.com/ai-dynamo/nixl.git /tmp/nixl \
     # The thin `nixl` meta-wheel, so both `import nixl` and `import nixl_cu13` work.
     && pip3 install --no-deps "nixl==1.5.2"
 
-# ===========================================================================
-# SQUASH STAGE: flatten the whole builder tree into a SINGLE layer.
-#
-# Root cause of v4-v9: the rootless-BuildKit image exporter resolved the file at
-# .../nvidia/nccl/lib/libnccl.so.2 to a STALE lower-layer blob (the GIN-less
-# 2.28.9 that torch's layer first wrote), even though the builder's FINAL
-# filesystem is correct (299 MB GIN 2.31.2, verified in-build by `nm`). Every
-# Dockerfile-level fix (re-pin last, dedicated final layer, --no-cache, pin in the
-# torch layer) was defeated by this multi-layer export/overlay resolution.
-#
-# `COPY --from=builder / /` into a fresh single-stage image collapses the entire
-# tree to ONE layer: there is then exactly one copy of every file = the builder's
-# final, verified-correct state. With a single layer there is no lower-layer blob
-# for the exporter to resolve the path back to -- the stale 2.28.9 cannot win. The
-# fix is portable (standard pip path, no patchelf / LD_PRELOAD / side paths) and
-# reproducible (one layer = the exact filesystem the self-test validated).
-#
-# Base is the STOCK CUDA image (so CUDA_HOME, the CUDA lib dirs on
-# LD_LIBRARY_PATH/PATH, and the NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES
-# runtime keys the GPU device plugin needs are inherited). The squash still holds:
-# the stock base has NO .../nvidia/nccl/lib/libnccl.so.2 (that path is created only
-# by pip), so there is no stale lower-layer copy of that file. The single
-# `COPY --from=builder / /` layer is the ONLY provider of the nccl .so = the GIN
-# 2.31.2 the builder's final (nm-verified) filesystem carries.
-ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS final
+# Single-stage build: no squash. torch and NCCL 2.31.2 go in in ONE layer (see the
+# PyTorch section), so the GIN-less 2.28.9 libnccl.so.2 is never committed to any layer
+# and there is no stale lower-layer copy to shadow the final one. Checked 2026-11-06:
+# a no-squash build ships the byte-identical libnccl.so.2 (sha256 78103983...) and is
+# 9.98 GiB / 30 layers vs 9.92 GiB / 1 squashed layer.
 
-# One COPY overlays the builder's entire final rootfs as a single top layer.
-COPY --from=builder / /
-
-# ENV/LABEL do not cross a stage boundary -- re-declare them here.
-ARG NIXL_PREFIX=/opt/nixl
-# Builder-stage LD_LIBRARY_PATH/PATH additions do NOT survive the stage boundary.
-# The libraries themselves are present in the squashed rootfs (COPY --from=builder),
-# but without these on the loader path the runtime cannot find gdrcopy
-# (GPUDirect RDMA -> libgdrapi.so), the EFA/OMPI libs, or the NIXL libs.
+# NIXL libs and bins. GDRCopy, OpenMPI and nccl-tests are already on the paths above.
 # NOTE: NIXL (meson) installs its shared libs into the multiarch subdir
-# ${NIXL_PREFIX}/lib/x86_64-linux-gnu (libnixl*.so, libserdes.so, libcore.so, ...),
-# NOT directly in ${NIXL_PREFIX}/lib. That subdir MUST be on the loader path or
-# nixl_test fails at startup with "libserdes.so: cannot open shared object file".
-ENV LD_LIBRARY_PATH="${NIXL_PREFIX}/lib/x86_64-linux-gnu:${NIXL_PREFIX}/lib:${NIXL_PREFIX}/lib64:/opt/gdrcopy/lib:/opt/amazon/openmpi/lib:/opt/amazon/efa/lib:$LD_LIBRARY_PATH"
-ENV PATH="${NIXL_PREFIX}/bin:/opt/amazon/openmpi/bin:/opt/amazon/efa/bin:/opt/gdrcopy/bin:/opt/nccl-tests/build:$PATH"
+# ${NIXL_PREFIX}/lib/x86_64-linux-gnu (libnixl*.so, libserdes.so, ...), NOT directly in
+# ${NIXL_PREFIX}/lib. That subdir MUST be on the loader path or the NIXL tests fail at
+# startup with "libserdes.so: cannot open shared object file".
+ENV LD_LIBRARY_PATH="${NIXL_PREFIX}/lib/x86_64-linux-gnu:${NIXL_PREFIX}/lib:${NIXL_PREFIX}/lib64:/opt/amazon/efa/lib:$LD_LIBRARY_PATH"
+ENV PATH="${NIXL_PREFIX}/bin:$PATH"
 # NIXL discovers its backend plugins from this directory at runtime. It opendir()s
 # this value LITERALLY (it does NOT split on ':'), so a colon-joined candidate
 # list makes the open fail -> createBackend('LIBFABRIC') fails.
 # Point it at the ONE real plugin dir (where libplugin_LIBFABRIC.so lands).
 ENV NIXL_PLUGIN_DIR="${NIXL_PREFIX}/lib/x86_64-linux-gnu/plugins"
 
-# OMPI / PMIx / NCCL interface hints (builder-stage ENV did not cross the boundary).
-ENV NVIDIA_GDRCOPY=enabled \
-    OMPI_MCA_pml=^ucx \
-    OMPI_MCA_btl=tcp,self \
-    OMPI_MCA_btl_tcp_if_exclude=lo,docker0,veth_def_agent \
-    OPAL_PREFIX=/opt/amazon/openmpi \
-    PMIX_MCA_gds=hash \
-    NCCL_SOCKET_IFNAME=^docker,lo,veth
 
 ################################ Runtime hints ##################################
 # DeepEP V2 EFA-GDA (GIN type 5) runtime selection; see awslabs README.
@@ -348,8 +311,7 @@ ENV FI_PROVIDER=efa \
 # libnccl-net-ofi.so, but NCCL 2.31.2 auto-discovers only the canonical
 # libnccl-net.so -- without these it SILENTLY falls back to the TCP Socket
 # transport (no EFA/RDMA). Point NCCL at the absolute plugin path so EFA is
-# used by default with zero per-run env. (ENV does not cross a stage boundary,
-# so the builder-stage NCCL_NET_PLUGIN must be re-declared here.)
+# used by default with zero per-run env. (This replaces the earlier NCCL_NET_PLUGIN=ofi.)
 ENV NCCL_NET_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
     NCCL_TUNER_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-tuner-ofi.so
 
@@ -397,18 +359,18 @@ RUN set -e; \
       && echo "OK: autocommand + my-test-package + devscripts removed from runtime layer" \
       || { echo "FAIL: a hygiene target is still present"; exit 1; }
 
-# Final gate on the SQUASHED single-layer image. Assert at the BINARY level
+# Final gate on the shipped image. Assert at the BINARY level
 # (the committed .so must export the GIN symbol) AND at the import level
 # (deep_ep + nixl must import, NCCL metadata must be 2.31.2) -- with ZERO special
-# env, exactly what a consumer sees. If the squash somehow still carries a stale
+# env, exactly what a consumer sees. If a lower layer somehow still carries a stale
 # .so, the build FAILS here rather than shipping broken.
 RUN set -e; \
     SO="$(find /usr/local/lib /usr/lib -path '*nvidia/nccl/lib/libnccl.so.2' 2>/dev/null | head -1)"; \
-    echo "squashed libnccl.so.2: $SO"; ls -la "$SO" || { echo "FATAL: libnccl.so.2 not found"; exit 1; }; \
+    echo "final libnccl.so.2: $SO"; ls -la "$SO" || { echo "FATAL: libnccl.so.2 not found"; exit 1; }; \
     if nm -D "$SO" 2>/dev/null | grep -q ncclCommQueryProperties; then \
-        echo "OK: squashed libnccl.so.2 exports GIN symbol ncclCommQueryProperties"; \
+        echo "OK: final libnccl.so.2 exports GIN symbol ncclCommQueryProperties"; \
     else \
-        echo "FATAL: squashed libnccl.so.2 lacks GIN symbol (stale 2.28.9 survived the squash)"; exit 1; \
+        echo "FATAL: final libnccl.so.2 lacks GIN symbol (stale 2.28.9 in the image)"; exit 1; \
     fi; \
     [ -f "$NCCL_NET_PLUGIN" ] && echo "OK: NCCL_NET_PLUGIN resolves: $NCCL_NET_PLUGIN" \
         || { echo "FATAL: NCCL_NET_PLUGIN not found at $NCCL_NET_PLUGIN (EFA would fall back to Socket)"; exit 1; }; \
@@ -418,11 +380,11 @@ RUN set -e; \
     for b in all_reduce_perf all_gather_perf alltoall_perf; do \
         command -v "$b" >/dev/null \
             && echo "OK: nccl-tests $b on PATH" \
-            || { echo "FATAL: nccl-tests $b missing from squashed image"; exit 1; }; \
+            || { echo "FATAL: nccl-tests $b missing from the image"; exit 1; }; \
     done; \
     for t in libfabric_topology_test rail_active_refcount_test desc_example \
              p2p_test serdes_test telemetry_reader; do \
-        [ -x "/opt/nixl-tests/$t" ] || { echo "FATAL: NIXL test $t missing from squashed image"; exit 1; }; \
+        [ -x "/opt/nixl-tests/$t" ] || { echo "FATAL: NIXL test $t missing from the image"; exit 1; }; \
         # libcuda.so.1 is the GPU driver: injected at run time, absent in a build.
         if ldd "/opt/nixl-tests/$t" | grep 'not found' | grep -qv 'libcuda\.so\.1'; then \
             echo "FATAL: NIXL test $t has unresolved libraries"; exit 1; \

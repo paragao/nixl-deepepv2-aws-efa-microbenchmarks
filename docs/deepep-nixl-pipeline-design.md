@@ -58,7 +58,7 @@ The pipeline must deliver seven things, in order:
 | D1 | **Pipeline engine = AWS CodePipeline** in account `${AWS_ACCOUNT_ID}`, region **${ECR_REGION}** (ECR repo home) | Shared account standard; keeps build + ECR + validation IAM in one account/region; no GitHub-hosted runner egress to the cluster | GitHub Actions (needs a self-hosted runner or kubeconfig secret to reach the cluster — more moving parts outside the account) |
 | D1a | **ECR auth call uses `--region ${ECR_TOKEN_REGION}`, but the repo and image live in `${ECR_REGION}`** | `aws ecr get-login-password` is only minting an auth token; the login/push registry host (`...dkr.ecr.${ECR_REGION}...`) and the repo region are `${ECR_REGION}`. The ${ECR_TOKEN_REGION} auth region is an account-specific requirement for the token mint. | Minting the token in ${ECR_REGION} — not used here per the account's auth setup |
 | D2 | **Build engine = AWS CodeBuild** with a privileged Linux GPU-less compute | CodePipeline's native build provider; supports Docker/BuildKit; can assume a role to push to ECR | In-cluster rootless BuildKit (current method) — kept as a documented fallback (§8.4), but CodeBuild gives CI isolation and logs |
-| D3 | **Base image stays single-layer squashed** via `COPY --from=builder / /` | A hard-won fix (build iterations v4–v12): BuildKit's content-addressed export kept deduping the committed `libnccl.so.2` back to the stale GIN-less 2.28.9 blob. One layer = exactly one copy of every file; no lower-layer blob to resolve back to. NCCL 2.31.2 is now pinned once, in the torch layer; the extra DeepEP-layer reinstall and the final re-pin layer are gone, the squash and the final `nm` gate remain. The vLLM image does not squash: its base already ships NCCL 2.31.2 and nothing on top installs another | Dockerfile-level re-pin, dedicated final layer, `--no-cache` alone — all defeated by multi-layer export dedup |
+| D3 | **NCCL 2.31.2 is pinned in the torch layer; no squash** | Build iterations v4–v12 shipped the stale GIN-less 2.28.9 `libnccl.so.2` from a lower layer, and a `COPY --from=builder / /` squash was the fix. Since torch and NCCL 2.31.2 now go in in one `RUN`, 2.28.9 is never committed to a layer, so the squash was removed (2026-11-06: a no-squash build ships the byte-identical `.so`, 9.98 vs 9.92 GiB). The final `nm` gate remains. The vLLM image does not squash: its base already ships NCCL 2.31.2 and nothing on top installs another | Dockerfile-level re-pin, dedicated final layer, `--no-cache` alone — all defeated by multi-layer export dedup |
 | D4 | **Validation runs on the shared EKS cluster** (`${EKS_CLUSTER}`, p5en.48xlarge H200 nodes), triggered by CodeBuild applying k8s manifests | The collective tests need real EFA + GPUDirect hardware; CodeBuild has no GPUs. CodeBuild assumes a role, runs `kubectl apply`, waits, reads logs, gates | Running tests in CodeBuild directly (no GPUs); a separate manual step (loses the gate) |
 | D5 | **Node driver prerequisite baked into the nodegroup launch template** (`NVreg_EnableStreamMemOPs=1`, `NVreg_RegistryDwords="PeerMappingOverride=1;"`) | GDAKI (GIN GPUDirect-Async backend) registers a GPU MMIO region (`host_register_iomem`) that **requires** these NVIDIA kernel-module flags. Without them GIN fails `DevComm setup failed on all available backends` on **any** node count | Per-instance reboot (nodes get replaced by the autoscaler and come back un-flagged — a loop) |
 | D6 | **Tests = NCCL (all-reduce, all-gather, all-to-all) + DeepEP V2 + NIXL**, all **2-node / 16-rank** | NCCL proves the EFA transport end to end; DeepEP V2 proves the GIN/EFA-GDA path; NIXL proves the LIBFABRIC/EFA path. 2 nodes is the minimum that exercises **internode** RDMA | Single-node (never touches the wire); 1 collective only (misses transport-specific failures) |
@@ -114,7 +114,7 @@ The pipeline must deliver seven things, in order:
 1. **Source** — a CodeStar Connection watches the git repo holding the Dockerfile,
    `setup_deepep_gin.sh`, and the k8s test manifests. The repo can be any
    accessible git repo (D12), not necessarily awsome-distributed-ai.
-2. **Build** — CodeBuild runs BuildKit, produces the squashed single-layer image, pushes it to ECR under a **candidate** tag (`:candidate-<gitsha>`).
+2. **Build** — CodeBuild runs BuildKit, produces the image, pushes it to ECR under a **candidate** tag (`:candidate-<gitsha>`).
 3. **Scan + SBOM + license (D11)** — Trivy scans the candidate; HIGH/CRITICAL
    fails the stage. `syft` emits `SBOM.txt`; a license step cross-checks every
    SBOM license against the AWS OSS allow-list and fails on any disallowed/unknown
@@ -134,8 +134,7 @@ The pipeline must deliver seven things, in order:
 ## 4. The Dockerfile as a template
 
 The base `Dockerfile` is written so others can **lift one integration section** for
-their own image. It is a **two-stage** build (`builder` → squashed `final`), both
-`FROM nvidia/cuda:13.0.2-devel-ubuntu22.04`. Sections, top to bottom:
+their own image. It is a **single-stage** build `FROM nvidia/cuda:13.0.2-devel-ubuntu22.04`. Sections, top to bottom:
 
 | Section | What it does | Reuse note |
 |---|---|---|
@@ -143,7 +142,6 @@ their own image. It is a **two-stage** build (`builder` → squashed `final`), b
 | **① awslabs base** | EFA installer 1.51.0 (sha256-checked), GDRCopy v2.5.2, torch 2.11.0+cu130 with GIN NCCL 2.31.2 pinned in the same layer, DeepEP V2 at `d75f22a5` | Follows `reference/deepep.Dockerfile` (vendored unchanged). Changes from it: EFA 1.51.0 + sha256, DeepEP pinned to a commit, NCCL pinned once in the torch layer, `debhelper`/`devscripts` dropped |
 | **② nccl-tests** | MPI-enabled `all_reduce/all_gather/alltoall` perf tests against the GIN NCCL | NCCL EFA transport benchmarks |
 | **③ NIXL v1.5.2** | meson/ninja build, `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; no UCX build, no `nixl_ep`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` | The NIXL+EFA integration template; `enable_plugins` errors if LIBFABRIC can't be built, and the step fails if a UCX plugin appears |
-| **④ Squash stage** | `COPY --from=builder / /` into fresh CUDA base | The single-layer fix (D3) |
 | **⑤ Runtime ENV + final gate** | `FI_PROVIDER=efa`, `NCCL_GIN_TYPE=5`, absolute `NCCL_NET_PLUGIN`, `ldconfig` for gdrcopy; final `nm` + plugin + NIXL test + import gate | The "works with zero per-run env" contract |
 
 The separate "GIN NCCL re-pin" layer and the UCX section of earlier versions are gone.
@@ -562,7 +560,7 @@ artifacts:
   files: [sbom.spdx.json, SBOM.txt]
 ```
 > **Note on `--no-cache` / dedup:** the original in-cluster rootless BuildKit hit
-> the layer-dedup trap (D3). The squash stage is the real fix; keep it. If a CI
+> the layer-dedup trap (D3). Pinning NCCL in the torch layer is the fix. If a CI
 > runner ever reintroduces a stale `libnccl.so.2`, the in-build `nm` assertion
 > fails the build — it cannot ship silently.
 
@@ -699,7 +697,7 @@ SBOM/license/self-doc) is identical regardless of where the repo is hosted.
 This image and its validation were developed empirically; the non-obvious facts
 baked into the design:
 
-- GIN NCCL `.so` dedup trap → single-layer squash (D3).
+- GIN NCCL `.so` dedup trap → NCCL pinned in the torch layer (D3).
 - GDAKI needs `NVreg_EnableStreamMemOPs=1` + `PeerMappingOverride=1` on the host (D5).
 - Autoscaler replaces rebooted nodes → bake flags into the launch template, not per-instance (D5).
 - DeepEP V2 switched internode from NVSHMEM to **NCCL GIN**; the legacy

@@ -62,19 +62,17 @@ Not built or not shipped, because each hard-codes the UCX backend: `nixl_ep` (NI
 
 These are the non-obvious choices. Keep them unless you know why you are changing one.
 
-### 1. Single-layer squash (`COPY --from=builder / /`), base image only
-`torch==2.11.0` pulls a GIN-less `nvidia-nccl-cu13 2.28.9`. Re-pinning NCCL 2.31.2 in
-a later layer updated pip metadata, but the exported image still shipped the stale
-`libnccl.so.2`: BuildKit's export kept deduping the committed `.so` back to the older
-layer blob, even with `--no-cache`. Two changes stop that:
+### 1. NCCL 2.31.2 goes in with torch, in one layer (no squash)
+`torch==2.11.0` pulls a GIN-less `nvidia-nccl-cu13 2.28.9`. Older builds re-pinned NCCL
+2.31.2 in a later layer; the 2.28.9 `libnccl.so.2` stayed in the lower layer and the
+pushed image kept shipping it. Those builds flattened everything into one layer
+(`COPY --from=builder / /`) to get rid of it.
 
-- the torch layer overwrites the 2.28.9 wheel with 2.31.2 in the same `RUN`, so the
-  stale `.so` is never committed as its own layer;
-- the final stage flattens the builder tree into one layer, so there is exactly one
-  copy of every file.
-
-The extra NCCL reinstall in the DeepEP layer and the separate re-pin layer are gone;
-the squash stage and the final `nm` gate remain.
+Now the torch `RUN` overwrites 2.28.9 with 2.31.2 in the same layer, so the stale `.so`
+is never committed to any layer. The squash is no longer needed and was removed: a test
+build without it shipped the byte-identical `libnccl.so.2` (sha256 `78103983...`) at
+9.98 GiB in 30 layers, against 9.92 GiB in one squashed layer. The final `nm` gate still
+fails the build if a stale `.so` ever comes back.
 
 The vLLM image does not squash. Its base already ships NCCL 2.31.2 and nothing in
 `Dockerfile.vllm` installs another NCCL. The build asserts the version did not move.
@@ -148,7 +146,6 @@ The vLLM image has no OpenMPI and no nccl-tests, so it is not launched with `mpi
 | awslabs base | Follows [`reference/deepep.Dockerfile`](./reference/deepep.Dockerfile) (vendored unchanged). Changes from it: EFA installer 1.51.0 with a sha256 check, DeepEP pinned to `d75f22a5`, NCCL 2.31.2 pinned once in the torch layer, `debhelper`/`devscripts` dropped |
 | nccl-tests | MPI-enabled perf tests built against the GIN NCCL |
 | NIXL v1.5.2 | meson build with `-Denable_plugins=LIBFABRIC`, `-Dlibfabric_path=/opt/amazon/efa`; copies the LIBFABRIC and backend-free tests to `/opt/nixl-tests` |
-| Squash stage | `COPY --from=builder / /` into a fresh CUDA base |
 | Runtime ENV + gates | EFA/GIN env, loader config, hygiene, final binary + import gate |
 
 Integration contracts worth copying:
@@ -217,7 +214,7 @@ ${AWS_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_REPO}:nixl1.5.2-deep
 @sha256:7fba91f1ce100ef2425b1df172f75a9b9da49aa0e6da10799af30291fa3be59f
 ```
 
-About 9.9 GiB compressed (the previous `091ce165` was 10.2 GiB), one squashed layer,
+About 9.9 GiB compressed (the previous `091ce165` was 10.2 GiB), one squashed layer (this build predates the squash removal),
 linux/amd64. Every in-build gate passed. `cuobjdump` in a fresh pod pulled by digest shows
 SASS for sm_90 / sm_100 / sm_103 / sm_120 in DeepEP V2 `_C*.so` and the three nccl-tests
 binaries. Every installed `nixl*` package is 1.5.2. License gate: SIGN-OFF, 0 blocked,
