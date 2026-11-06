@@ -322,8 +322,13 @@ ENV NCCL_NET_PLUGIN=/opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
 # standard /etc/ld.so.conf.d mechanism so it resolves for EVERY process, not only
 # those that inherit LD_LIBRARY_PATH. ldconfig does not read LD_LIBRARY_PATH, so
 # without this the loader cache would not list libgdrapi.so.
+# The GIN NCCL 2.31.2 lives only in the pip wheel dir (apt libnccl2 is removed at the
+# top). torch/deep_ep find it themselves, but plain ELF consumers (nccl-tests, anything
+# linked with -lnccl) need the loader to know the dir. The old squash stage hid this:
+# its stock CUDA base still carried the apt NCCL 2.28.3 in /usr/lib/x86_64-linux-gnu.
 RUN echo "/opt/gdrcopy/lib" > /etc/ld.so.conf.d/gdrcopy.conf \
     && echo "/opt/amazon/ofi-nccl/lib" > /etc/ld.so.conf.d/aws-ofi-nccl.conf \
+    && echo "/usr/local/lib/python${PYTHON_VERSION}/dist-packages/nvidia/nccl/lib" > /etc/ld.so.conf.d/nccl-gin.conf \
     && ldconfig
 
 # License / image hygiene. Three items trip the OSS license gate but are NOT
@@ -381,6 +386,9 @@ RUN set -e; \
         command -v "$b" >/dev/null \
             && echo "OK: nccl-tests $b on PATH" \
             || { echo "FATAL: nccl-tests $b missing from the image"; exit 1; }; \
+        ldd "$(command -v "$b")" | grep -qF "libnccl.so.2 => $SO " \
+            && echo "OK: nccl-tests $b loads the GIN libnccl.so.2 ($SO)" \
+            || { echo "FATAL: nccl-tests $b does not load $SO"; ldd "$(command -v "$b")" | grep nccl; exit 1; }; \
     done; \
     for t in libfabric_topology_test rail_active_refcount_test desc_example \
              p2p_test serdes_test telemetry_reader; do \
