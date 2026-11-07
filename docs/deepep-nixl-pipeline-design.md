@@ -358,6 +358,9 @@ at or above its floor:
 | DeepEP combine bus BW | 187.0 | 177.6 | **−5%** |
 | nixl_lf (1 GPU READ, 1 GiB) mean GB/s | 47.2 | 45.8 | −3%, plus PASS on all 3 runs |
 
+NCCL baselines reset 2026-11-07 on NCCL 2.31.2 (image `a8688aad`). The old ones (476.5 /
+352.9 / 83.5) were measured on apt NCCL 2.28.3, which the former squash stage brought back.
+
 The nixl_lf baseline is from image `eeaa6801`, 2 x p5en, 2026-11-03 (47.23 / 47.26 /
 47.22). Context, not gated: 8 GPUs give 382.5 GB/s READ and 382.2 GB/s WRITE (sum).
 
