@@ -351,9 +351,9 @@ at or above its floor:
 
 | Suite / metric | Baseline | Floor | Tolerance |
 |---|---|---|---|
-| NCCL all_reduce busbw @8G | 476.5 | 462.2 | −3% |
-| NCCL all_gather busbw @8G | 352.9 | 342.3 | −3% |
-| NCCL all_to_all busbw @8G | 83.5 | 81.0 | −3% |
+| NCCL all_reduce busbw @8G | 479.5 | 465.1 | −3% |
+| NCCL all_gather busbw @8G | 349.3 | 338.8 | −3% |
+| NCCL all_to_all busbw @8G | 87.8 | 85.2 | −3% |
 | DeepEP dispatch bus BW | 267.0 | 259.0 | −3% |
 | DeepEP combine bus BW | 187.0 | 177.6 | **−5%** |
 | nixl_lf (1 GPU READ, 1 GiB) mean GB/s | 47.2 | 45.8 | −3%, plus PASS on all 3 runs |

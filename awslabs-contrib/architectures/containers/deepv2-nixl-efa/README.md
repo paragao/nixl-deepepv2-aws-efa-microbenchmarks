@@ -225,9 +225,9 @@ logs `NCCL version 2.31.2+cuda13.3` and `NET/OFI Selected provider is efa ... (f
 
 | Metric | Floor | 3 runs | Mean | Result |
 |---|---|---|---|---|
-| NCCL all_reduce busbw @8G (GB/s) | 462.2 | 479.54 / 479.81 / 479.00 | 479.5 | PASS |
-| NCCL all_gather busbw @8G | 342.3 | 349.40 / 349.12 / 349.43 | 349.3 | PASS |
-| NCCL all_to_all busbw @8G | 81.0 | 87.84 / 87.81 / 87.79 | 87.8 | PASS |
+| NCCL all_reduce busbw @8G (GB/s) | 465.1 | 479.54 / 479.81 / 479.00 | 479.5 | PASS |
+| NCCL all_gather busbw @8G | 338.8 | 349.40 / 349.12 / 349.43 | 349.3 | PASS |
+| NCCL all_to_all busbw @8G | 85.2 | 87.84 / 87.81 / 87.79 | 87.8 | PASS |
 | DeepEP V2 dispatch bus BW | 259.0 | 266.1 / 265.9 / 265.8 | 266.0 | PASS |
 | DeepEP V2 combine bus BW | 177.6 | 193.2 / 193.0 / 192.4 | 192.9 | PASS |
 | NIXL 1 GPU READ (`nixl_lf`) | 45.8 | 46.80 / 46.75 / 46.88 | 46.81 | PASS |
@@ -243,7 +243,8 @@ GPU 0 included) with 0 `post failed` lines. NIXL tests and GDRCopy `sanity` / `c
 2.31.2. Their squash stage started from a fresh `nvidia/cuda` image, which ships apt NCCL
 2.28.3, and `COPY --from=builder / /` cannot delete it; nccl-tests found it first. DeepEP and
 NIXL always used 2.31.2. The NCCL gate floors were set on 2.28.3; 2.31.2 clears them
-(all_to_all +5%). The new build gate fails if nccl-tests do not load the 2.31.2
+(all_to_all +5%), and these runs are now the NCCL baseline (floors 465.1 / 338.8 / 85.2,
+-3%). The new build gate fails if nccl-tests do not load the 2.31.2
 `libnccl.so.2`.
 
 The squashed slim build `7fba91f1` (commit `c8a6180`, 9.9 GiB, one layer) passed the same
@@ -468,7 +469,7 @@ Results on `eeaa6801`:
 
 | Metric | Baseline | Floor | Mean | Result |
 |---|---|---|---|---|
-| NCCL all_reduce busbw @8G (NCCL 2.28.3, see above) | 476.5 | 462.2 | 477.7 | PASS |
+| NCCL all_reduce busbw @8G (NCCL 2.28.3, see above; old floors) | 476.5 | 462.2 | 477.7 | PASS |
 | NCCL all_gather busbw @8G | 352.9 | 342.3 | 349.0 | PASS |
 | NCCL all_to_all busbw @8G | 83.5 | 81.0 | 83.5 | PASS |
 | DeepEP V2 dispatch bus BW | 267.0 | 259.0 | 264.9 | PASS |
