@@ -11,7 +11,8 @@
 # the shared ECR repo.
 #
 # Baseline source: 3x validation on image @sha256:fb17de70 (2026-10-15),
-# 2 nodes p5en.48xlarge (sm_90), 16 ranks, EFA 1.50.0, GIN NCCL 2.31.2.
+# 2 nodes p5en.48xlarge (sm_90), 16 ranks, EFA 1.50.0, GIN NCCL 2.31.2 for DeepEP.
+# The NCCL collective baselines were reset on 2026-11-07 (see nccl_collectives).
 # Spread across the 3 reference iterations was <=1% for the NCCL collectives
 # and DeepEP dispatch (the -3% band sits well outside their noise), but DeepEP
 # combine ran ~6% peak-to-peak -- hence its dedicated -5% floor.
@@ -36,15 +37,22 @@ suites:
     metric: busbw
     message_size: 8G
     # higher is better; pass if mean(3) >= baseline * 0.97
+    # Baseline reset 2026-11-07 on NCCL 2.31.2: image a8688aad (commit e7d45ef), 2 x p5en,
+    # 16 ranks, every rank logs "NCCL version 2.31.2+cuda13.3". Runs:
+    #   all_reduce 479.54 / 479.81 / 479.00, all_gather 349.40 / 349.12 / 349.43,
+    #   all_to_all 87.84 / 87.81 / 87.79.
+    # The previous baseline (476.5 / 352.9 / 83.5, image fb17de70) was measured on apt
+    # NCCL 2.28.3: the squash stage's fresh nvidia/cuda base brought it back and
+    # nccl-tests loaded it, not the GIN 2.31.2.
     baseline:
-      all_reduce: 476.5
-      all_gather: 352.9
-      all_to_all: 83.5
+      all_reduce: 479.5
+      all_gather: 349.3
+      all_to_all: 87.8
     # min acceptable = baseline * 0.97 (recorded for clarity; pipeline derives it)
     floor_at_minus3pct:
-      all_reduce: 462.2
-      all_gather: 342.3
-      all_to_all: 81.0
+      all_reduce: 465.1
+      all_gather: 338.8
+      all_to_all: 85.2
 
   deepep_ep:
     kind: throughput
@@ -60,21 +68,32 @@ suites:
       dispatch_wire: 82.0
       combine_wire: 57.0
 
-  nixl_test:
-    kind: functional         # pass/fail, not a bandwidth number
-    unit: boolean
-    # the -3% tolerance does not apply to a functional test
+  # NIXL over EFA: benchmarks/nixl/nixl-lf-*-validate.yaml (nixl_lf_test.py). ONLY the
+  # LIBFABRIC backend is created -- EFA does not support UCX. Defaults: 1 GPU, READ,
+  # 1 GiB per transfer, 5 transfers per run, 3 runs (NIXL_ITERS="1 2 3").
+  # Replaces NIXL's own nixl_test, which hard-codes the UCX backend.
+  nixl_lf:
+    kind: functional+throughput
+    unit: GB/s               # NIXL_LF_RESULT mean_GBps, one GPU
     baseline:
-      result: PASS           # buffers match, transfer success, rc=0, both pods
+      result: PASS
+      mean_GBps: 47.2        # image eeaa6801, 2 x p5en, 2026-11-03 (47.23 / 47.26 / 47.22)
+    floor:
+      mean_GBps: 45.8        # -3%
     pass_requires:
-      - "Transfer completed and Buffers match with Initiator"
-      - "exit code 0 on both target and initiator"
+      - "NIXL backends created: ['LIBFABRIC'] and LIBFABRIC backend selected"
+      - "verify=OK on every transfer (5/5 per run)"
+      - "NIXL_LF_RESULT PASS; NIXL_LF_RUN_DONE ... rc=0 on both pods"
+      - "EFA rdma_read_bytes rises by 5 GiB per run (EFA_COUNTERS lines)"
+    context:                 # not gated; NIXL_GPUS="0 1 2 3 4 5 6 7", --iters 20
+      g8_read_sum_GBps: 382.5
+      g8_write_sum_GBps: 382.2
 
 verdict_rule: >
   SIGN OFF (allow publish) only if every throughput metric's 3-run mean is at or
-  above its own floor (default -3%; DeepEP combine_bus -5%) AND nixl_test passes
-  all 3 runs. Otherwise BLOCK publication and report which metric regressed and
-  by how much.
+  above its own floor (default -3%; DeepEP combine_bus -5%) AND nixl_lf passes
+  all 3 runs at or above its floor. Otherwise BLOCK publication and report which
+  metric regressed and by how much.
 
 # ---------------------------------------------------------------------------
 # LICENSE GATE policy (read by check_licenses.py).
@@ -222,10 +241,10 @@ license_policy:
         source of these exact versions available (they are on PyPI at the pinned
         versions in vllm-requirements.txt). Modifying any of these files would
         make the change itself MPL/LGPL -- do not patch them in this image.
-      # Needs an OSS/legal sign-off before publish. While true, a component that
-      # only passes through this exception turns the verdict into PENDING-APPROVAL
-      # (exit 2), not SIGN-OFF. Set to false once approved.
-      pending_approval: true
+      # Signed off by the repo owner (paragao) on 2026-11-06 for the vllm0.33.0-efa-slim
+      # image (sha256:94da4fa4...). While true, a component that only passed through this
+      # exception made the verdict PENDING-APPROVAL (exit 2) instead of SIGN-OFF.
+      pending_approval: false
       package_type: pypi
       packages:
         - certifi            # MPL-2.0 (Mozilla CA bundle)
@@ -354,6 +373,10 @@ license_policy:
     loguru: MIT                # Delgan/loguru LICENSE
     quack-kernels: Apache-2.0  # Dao-AILab/quack LICENSE; wheel 0.6.5 dist-info/licenses/LICENSE
     oss-harmony: Apache-2.0    # fork of openai/harmony (Apache-2.0); wheel 0.0.11 dist-info/licenses/LICENSE
+    # vllm/vllm-openai:v0.33.0-x86_64-efa base (slim Dockerfile.vllm), checked 2026-11-04 in image 192fe945:
+    accelerate: Apache-2.0     # METADATA "License: Apache" + dist-info/licenses/LICENSE = Apache License 2.0
+    gguf: MIT                  # ggml-org/llama.cpp; dist-info/licenses/LICENSE = MIT
+    mooncake-transfer-engine*: Apache-2.0   # kvcache-ai/Mooncake; classifier Apache Software License (wheel has no LICENSE file)
 
   review_note: >
     Exceptions + pins were set from the actual syft SBOM of image
@@ -386,7 +409,7 @@ measured:
     # dedicated -5% band accounts for combine's ~6% measured spread.
     # dispatch (the tighter, GIN-RDMA-bound half of EP) is exactly on baseline.
 
-  nixl_test:
+  nixl_test:                 # historical (image fb17de70); replaced by nixl_lf above
     iters: [PASS, PASS, PASS]
     result: PASS
     pass: true
